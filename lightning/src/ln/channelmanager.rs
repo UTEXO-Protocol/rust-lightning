@@ -65,10 +65,10 @@ use crate::ln::chan_utils::selected_commitment_sat_per_1000_weight;
 #[cfg(any(test, fuzzing))]
 use crate::ln::channel::QuiescentAction;
 use crate::ln::channel::{
-	self, hold_time_since, Channel, ChannelError, ChannelUpdateStatus, DisconnectResult,
-	FundedChannel, FundingTxSigned, InboundV1Channel, OutboundV1Channel, PendingV2Channel,
-	ReconnectionMsg, ShutdownResult, SpliceFundingFailed, StfuResponse, UpdateFulfillCommitFetch,
-	WithChannelContext,
+	self, hold_time_since, Channel, ChannelContext, ChannelError, ChannelUpdateStatus,
+	DisconnectResult, FundedChannel, FundingTxSigned, InboundV1Channel, OutboundV1Channel,
+	PendingV2Channel, ReconnectionMsg, ShutdownResult, SpliceFundingFailed, StfuResponse,
+	UpdateFulfillCommitFetch, WithChannelContext,
 };
 use crate::ln::channel_state::ChannelDetails;
 use crate::ln::funding::SpliceContribution;
@@ -1147,7 +1147,19 @@ enum FundingType {
 	/// flow and the caller wants to perform the validation and broadcasting. An example of such
 	/// scenario could be when constructing the funding transaction as part of a Payjoin
 	/// transaction.
-	Unchecked(OutPoint),
+	Unchecked(OutPoint, ChannelFundingType),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Selects the trust assumptions used when funding is not expected to follow the normal
+/// broadcast-and-confirm path.
+pub enum ChannelFundingType {
+	/// Preserve the existing behavior where the channel is still
+	/// expected to eventually appear on-chain.
+	Regular,
+	/// Marks the channel as intentionally never-broadcast so
+	/// normal funding-timeout handling does not apply.
+	Virtual,
 }
 
 impl FundingType {
@@ -1155,7 +1167,7 @@ impl FundingType {
 		match self {
 			FundingType::Checked(tx) => tx.compute_txid(),
 			FundingType::CheckedManualBroadcast(tx) => tx.compute_txid(),
-			FundingType::Unchecked(outp) => outp.txid,
+			FundingType::Unchecked(outp, _) => outp.txid,
 		}
 	}
 
@@ -1163,7 +1175,7 @@ impl FundingType {
 		match self {
 			FundingType::Checked(tx) => tx.clone(),
 			FundingType::CheckedManualBroadcast(tx) => tx.clone(),
-			FundingType::Unchecked(_) => Transaction {
+			FundingType::Unchecked(_, _) => Transaction {
 				version: bitcoin::transaction::Version::TWO,
 				lock_time: bitcoin::absolute::LockTime::ZERO,
 				input: Vec::new(),
@@ -1176,8 +1188,12 @@ impl FundingType {
 		match self {
 			FundingType::Checked(_) => false,
 			FundingType::CheckedManualBroadcast(_) => true,
-			FundingType::Unchecked(_) => true,
+			FundingType::Unchecked(_, _) => true,
 		}
+	}
+
+	fn is_trusted_no_broadcast(&self) -> bool {
+		matches!(self, FundingType::Unchecked(_, ChannelFundingType::Virtual))
 	}
 }
 
@@ -6125,7 +6141,7 @@ where
 	#[rustfmt::skip]
 	fn funding_transaction_generated_intern<FundingOutput: FnMut(&OutboundV1Channel<SP>) -> Result<OutPoint, &'static str>>(
 		&self, temporary_channel_id: ChannelId, counterparty_node_id: PublicKey, funding_transaction: Transaction, is_batch_funding: bool,
-		mut find_funding_output: FundingOutput, is_manual_broadcast: bool,
+		mut find_funding_output: FundingOutput, is_manual_broadcast: bool, is_trusted_no_broadcast: bool,
 	) -> Result<(), APIError> {
 		let per_peer_state = self.per_peer_state.read().unwrap();
 		let peer_state_mutex = per_peer_state.get(&counterparty_node_id)
@@ -6156,6 +6172,12 @@ where
 						err: format!("Channel {temporary_channel_id} with counterparty {counterparty_node_id} is not an unfunded, outbound channel ready to fund"),
 					});
 				}
+				if is_trusted_no_broadcast && chan.get().minimum_depth() != Some(0) {
+					return Err(APIError::APIMisuseError {
+						err: "ChannelFundingType::Virtual requires a negotiated 0-conf channel"
+							.to_owned(),
+					});
+				}
 				match chan.remove().into_unfunded_outbound_v1() {
 					Ok(chan) => chan,
 					Err(chan) => {
@@ -6173,6 +6195,13 @@ where
 				});
 			},
 		};
+
+		if is_manual_broadcast {
+			chan.context.set_manual_broadcast();
+			if is_trusted_no_broadcast {
+				chan.context.set_trusted_no_broadcast();
+			}
+		}
 
 		let funding_txo = match find_funding_output(&chan) {
 			Ok(found_funding_txo) => found_funding_txo,
@@ -6213,9 +6242,6 @@ where
 						msg,
 					});
 				}
-				if is_manual_broadcast {
-					chan.context.set_manual_broadcast();
-				}
 
 				e.insert(Channel::from(chan));
 				Ok(())
@@ -6235,6 +6261,7 @@ where
 			funding_transaction,
 			false,
 			|_| Ok(OutPoint { txid, index: output_index }),
+			false,
 			false,
 		)
 	}
@@ -6285,9 +6312,14 @@ where
 	///
 	/// Call this in response to a [`Event::FundingGenerationReady`] event.
 	///
-	/// Note that if this method is called successfully, the funding transaction won't be
-	/// broadcasted and you are expected to broadcast it manually when receiving the
-	/// [`Event::FundingTxBroadcastSafe`] event.
+	/// Note that if this method is called successfully and `channel_funding_type` is
+	/// [`ChannelFundingType::Regular`], the funding transaction won't be broadcasted and you are
+	/// expected to broadcast it manually when receiving the [`Event::FundingTxBroadcastSafe`]
+	/// event.
+	///
+	/// If `channel_funding_type` is [`ChannelFundingType::Virtual`],
+	/// [`Event::FundingTxBroadcastSafe`] will not be emitted and the funding is expected never to
+	/// be broadcast on-chain.
 	///
 	/// Returns [`APIError::ChannelUnavailable`] if a funding transaction has already been provided
 	/// for the channel or if the channel has been closed as indicated by [`Event::ChannelClosed`].
@@ -6306,11 +6338,12 @@ where
 	/// [`ChannelManager::funding_transaction_generated`]: crate::ln::channelmanager::ChannelManager::funding_transaction_generated
 	pub fn unsafe_manual_funding_transaction_generated(
 		&self, temporary_channel_id: ChannelId, counterparty_node_id: PublicKey, funding: OutPoint,
+		channel_funding_type: ChannelFundingType,
 	) -> Result<(), APIError> {
 		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
 
 		let temporary_chans = &[(&temporary_channel_id, &counterparty_node_id)];
-		let funding_type = FundingType::Unchecked(funding);
+		let funding_type = FundingType::Unchecked(funding, channel_funding_type);
 		self.batch_funding_transaction_generated_intern(temporary_chans, funding_type)
 	}
 
@@ -6424,6 +6457,7 @@ where
 			}
 		});
 		let is_manual_broadcast = funding.is_manual_broadcast();
+		let is_trusted_no_broadcast = funding.is_trusted_no_broadcast();
 		for &(temporary_channel_id, counterparty_node_id) in temporary_channels {
 			result = result.and_then(|_| self.funding_transaction_generated_intern(
 				*temporary_channel_id,
@@ -6448,7 +6482,7 @@ where
 							}
 							OutPoint { txid, index: output_index.unwrap() }
 						},
-						FundingType::Unchecked(outpoint) => outpoint.clone(),
+						FundingType::Unchecked(outpoint, _) => outpoint.clone(),
 					};
 					if let Some(funding_batch_state) = funding_batch_state.as_mut() {
 						// TODO(dual_funding): We only do batch funding for V1 channels at the moment, but we'll probably
@@ -6458,7 +6492,9 @@ where
 					}
 					Ok(outpoint)
 				},
-				is_manual_broadcast)
+				is_manual_broadcast,
+				is_trusted_no_broadcast,
+			)
 			);
 		}
 		if let Err(ref e) = result {
@@ -9733,7 +9769,13 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 		}
 
 		if let Some(tx) = funding_broadcastable {
-			if channel.context.is_manual_broadcast() {
+			if channel.context.is_trusted_no_broadcast() {
+				log_info!(
+					logger,
+					"Not emitting FundingTxBroadcastSafe for virtual channel {}",
+					channel.context.channel_id()
+				);
+			} else if channel.context.is_manual_broadcast() {
 				log_info!(logger, "Not broadcasting funding transaction with txid {} as it is manually managed", tx.compute_txid());
 				let mut pending_events = self.pending_events.lock().unwrap();
 				match channel.funding.get_funding_txo() {
@@ -9922,6 +9964,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			temporary_channel_id,
 			counterparty_node_id,
 			false,
+			ChannelFundingType::Regular,
 			user_channel_id,
 			config_overrides,
 		)
@@ -9943,27 +9986,45 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	/// If it does not confirm before we decide to close the channel, or if the funding transaction
 	/// does not pay to the correct script the correct amount, *you will lose funds*.
 	///
+	/// If `channel_funding_type` is [`ChannelFundingType::Virtual`],
+	/// the accepted channel is also marked as manual-broadcast so the associated
+	/// monitor does not attempt to broadcast commitment transactions
+	/// before funding has ever been seen on-chain.
+	///
 	/// [`Event::OpenChannelRequest`]: events::Event::OpenChannelRequest
 	/// [`Event::ChannelClosed::user_channel_id`]: events::Event::ChannelClosed::user_channel_id
 	pub fn accept_inbound_channel_from_trusted_peer_0conf(
 		&self, temporary_channel_id: &ChannelId, counterparty_node_id: &PublicKey,
 		user_channel_id: u128, config_overrides: Option<ChannelConfigOverrides>,
+		channel_funding_type: ChannelFundingType,
 	) -> Result<(), APIError> {
 		self.do_accept_inbound_channel(
 			temporary_channel_id,
 			counterparty_node_id,
 			true,
+			channel_funding_type,
 			user_channel_id,
 			config_overrides,
 		)
 	}
 
+	fn apply_inbound_channel_funding_type(
+		context: &mut ChannelContext<SP>, channel_funding_type: ChannelFundingType,
+	) {
+		if channel_funding_type == ChannelFundingType::Virtual {
+			context.set_manual_broadcast();
+			context.set_trusted_no_broadcast();
+		}
+	}
+
 	/// TODO(dual_funding): Allow contributions, pass intended amount and inputs
 	#[rustfmt::skip]
 	fn do_accept_inbound_channel(
-		&self, temporary_channel_id: &ChannelId, counterparty_node_id: &PublicKey, accept_0conf: bool,
+		&self, temporary_channel_id: &ChannelId, counterparty_node_id: &PublicKey,
+		accept_0conf: bool, channel_funding_type: ChannelFundingType,
 		user_channel_id: u128, config_overrides: Option<ChannelConfigOverrides>
 	) -> Result<(), APIError> {
+		debug_assert!(accept_0conf || channel_funding_type == ChannelFundingType::Regular);
 
 		let mut config = self.config.read().unwrap().clone();
 
@@ -10004,6 +10065,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							user_channel_id, &config, best_block_height, &self.logger, accept_0conf, self.ldk_data_dir.clone()
 						).map_err(|err| MsgHandleErrInternal::from_chan_no_close(err, *temporary_channel_id)
 						).map(|mut channel| {
+							Self::apply_inbound_channel_funding_type(&mut channel.context, channel_funding_type);
 							let logger = WithChannelContext::from(&self.logger, &channel.context, None);
 							let message_send_event = channel.accept_inbound_channel(&&logger).map(|msg| {
 								MessageSendEvent::SendAcceptChannel {
@@ -10026,7 +10088,8 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						).map_err(|e| {
 							let channel_id = open_channel_msg.common_fields.temporary_channel_id;
 							MsgHandleErrInternal::from_chan_no_close(e, channel_id)
-						}).map(|channel| {
+						}).map(|mut channel| {
+							Self::apply_inbound_channel_funding_type(&mut channel.context, channel_funding_type);
 							let message_send_event =  MessageSendEvent::SendAcceptChannelV2 {
 								node_id: channel.context.get_counterparty_node_id(),
 								msg: channel.accept_inbound_dual_funded_channel()

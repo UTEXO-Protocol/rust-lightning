@@ -783,8 +783,11 @@ pub enum Event {
 	///
 	/// This event is only emitted if you called
 	/// [`ChannelManager::unsafe_manual_funding_transaction_generated`] instead of
-	/// [`ChannelManager::funding_transaction_generated`].
+	/// [`ChannelManager::funding_transaction_generated`], and only for manual-broadcast channels
+	/// that are still expected to eventually appear on-chain. It is not emitted for
+	/// [`ChannelFundingType::Virtual`] channels.
 	///
+	/// [`ChannelFundingType::Virtual`]: crate::ln::channelmanager::ChannelFundingType::Virtual
 	/// [`ChannelManager::unsafe_manual_funding_transaction_generated`]: crate::ln::channelmanager::ChannelManager::unsafe_manual_funding_transaction_generated
 	/// [`ChannelManager::funding_transaction_generated`]: crate::ln::channelmanager::ChannelManager::funding_transaction_generated
 	FundingTxBroadcastSafe {

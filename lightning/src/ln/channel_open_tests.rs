@@ -19,7 +19,8 @@ use crate::ln::channel::{
 	OutboundV1Channel, COINBASE_MATURITY, UNFUNDED_CHANNEL_AGE_LIMIT_TICKS,
 };
 use crate::ln::channelmanager::{
-	self, BREAKDOWN_TIMEOUT, MAX_UNFUNDED_CHANNEL_PEERS, MAX_UNFUNDED_CHANS_PER_PEER,
+	self, ChannelFundingType, BREAKDOWN_TIMEOUT, MAX_UNFUNDED_CHANNEL_PEERS,
+	MAX_UNFUNDED_CHANS_PER_PEER,
 };
 use crate::ln::msgs::{
 	AcceptChannel, BaseMessageHandler, ChannelMessageHandler, ErrorAction, MessageSendEvent,
@@ -175,6 +176,7 @@ fn test_0conf_limiting() {
 					&last_random_pk,
 					23,
 					None,
+					ChannelFundingType::Regular,
 				)
 				.unwrap();
 		},
@@ -1156,7 +1158,12 @@ pub fn test_manually_accept_inbound_channel_request() {
 		create_funding_transaction(&nodes[0], &node_b_id, 100_000, 42);
 	nodes[0]
 		.node
-		.unsafe_manual_funding_transaction_generated(temp_channel_id, node_b_id, funding_outpoint)
+		.unsafe_manual_funding_transaction_generated(
+			temp_channel_id,
+			node_b_id,
+			funding_outpoint,
+			ChannelFundingType::Regular,
+		)
 		.unwrap();
 	check_added_monitors(&nodes[0], 0);
 
@@ -2419,7 +2426,12 @@ pub fn test_manual_funding_abandon() {
 		create_funding_transaction(&nodes[0], &node_b_id, 100_000, 42);
 	nodes[0]
 		.node
-		.unsafe_manual_funding_transaction_generated(temp_channel_id, node_b_id, funding_outpoint)
+		.unsafe_manual_funding_transaction_generated(
+			temp_channel_id,
+			node_b_id,
+			funding_outpoint,
+			ChannelFundingType::Regular,
+		)
 		.unwrap();
 	check_added_monitors(&nodes[0], 0);
 
@@ -2468,7 +2480,12 @@ pub fn test_funding_signed_event() {
 		create_funding_transaction(&nodes[0], &node_b_id, 100_000, 42);
 	nodes[0]
 		.node
-		.unsafe_manual_funding_transaction_generated(temp_channel_id, node_b_id, funding_outpoint)
+		.unsafe_manual_funding_transaction_generated(
+			temp_channel_id,
+			node_b_id,
+			funding_outpoint,
+			ChannelFundingType::Regular,
+		)
 		.unwrap();
 	check_added_monitors(&nodes[0], 0);
 

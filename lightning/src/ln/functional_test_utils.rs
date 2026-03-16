@@ -26,7 +26,7 @@ use crate::ln::chan_utils::{
 	commitment_tx_base_weight, COMMITMENT_TX_WEIGHT_PER_HTLC, TRUC_MAX_WEIGHT,
 };
 use crate::ln::channelmanager::{
-	AChannelManager, ChainParameters, ChannelManager, ChannelManagerReadArgs, PaymentId,
+	self, AChannelManager, ChainParameters, ChannelManager, ChannelManagerReadArgs, PaymentId,
 	RAACommitmentOrder, RecipientOnionFields, MIN_CLTV_EXPIRY_DELTA,
 };
 use crate::ln::funding::FundingTxInput;
@@ -1607,12 +1607,13 @@ pub fn exchange_open_accept_zero_conf_chan<'a, 'b, 'c, 'd>(
 		Event::OpenChannelRequest { temporary_channel_id, .. } => {
 			receiver
 				.node
-				.accept_inbound_channel_from_trusted_peer_0conf(
-					&temporary_channel_id,
-					&initiator_node_id,
-					0,
-					None,
-				)
+					.accept_inbound_channel_from_trusted_peer_0conf(
+						&temporary_channel_id,
+						&initiator_node_id,
+						0,
+						None,
+						channelmanager::ChannelFundingType::Regular,
+					)
 				.unwrap();
 		},
 		_ => panic!("Unexpected event"),

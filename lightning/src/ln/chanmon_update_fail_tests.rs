@@ -19,7 +19,7 @@ use crate::chain::transaction::OutPoint;
 use crate::chain::{ChannelMonitorUpdateStatus, Listen, Watch};
 use crate::events::{ClosureReason, Event, HTLCHandlingFailureType, PaymentPurpose};
 use crate::ln::channel::AnnouncementSigsState;
-use crate::ln::channelmanager::{PaymentId, RAACommitmentOrder, RecipientOnionFields, Retry};
+use crate::ln::channelmanager::{self, PaymentId, RAACommitmentOrder, RecipientOnionFields, Retry};
 use crate::ln::msgs;
 use crate::ln::msgs::{
 	BaseMessageHandler, ChannelMessageHandler, MessageSendEvent, RoutingMessageHandler,
@@ -3253,7 +3253,13 @@ fn do_test_outbound_reload_without_init_mon(use_0conf: bool) {
 			if use_0conf {
 				nodes[1]
 					.node
-					.accept_inbound_channel_from_trusted_peer_0conf(&chan_id, &node_a_id, 0, None)
+					.accept_inbound_channel_from_trusted_peer_0conf(
+						&chan_id,
+						&node_a_id,
+						0,
+						None,
+						channelmanager::ChannelFundingType::Regular,
+					)
 					.unwrap();
 			} else {
 				nodes[1].node.accept_inbound_channel(&chan_id, &node_a_id, 0, None).unwrap();
@@ -3363,7 +3369,13 @@ fn do_test_inbound_reload_without_init_mon(use_0conf: bool, lock_commitment: boo
 			if use_0conf {
 				nodes[1]
 					.node
-					.accept_inbound_channel_from_trusted_peer_0conf(&chan_id, &node_a_id, 0, None)
+					.accept_inbound_channel_from_trusted_peer_0conf(
+						&chan_id,
+						&node_a_id,
+						0,
+						None,
+						channelmanager::ChannelFundingType::Regular,
+					)
 					.unwrap();
 			} else {
 				nodes[1].node.accept_inbound_channel(&chan_id, &node_a_id, 0, None).unwrap();

@@ -3031,6 +3031,7 @@ where
 	/// This flag indicates that it is the user's responsibility to validated and broadcast the
 	/// funding transaction.
 	is_manual_broadcast: bool,
+	trusted_no_broadcast: bool,
 	is_batch_funding: Option<()>,
 
 	counterparty_next_commitment_point: Option<PublicKey>,
@@ -3718,6 +3719,7 @@ where
 			blocked_monitor_updates: Vec::new(),
 
 			is_manual_broadcast: false,
+			trusted_no_broadcast: false,
 
 			interactive_tx_signing_session: None,
 
@@ -3961,6 +3963,7 @@ where
 			blocked_monitor_updates: Vec::new(),
 			local_initiated_shutdown: None,
 			is_manual_broadcast: false,
+			trusted_no_broadcast: false,
 
 			interactive_tx_signing_session: None,
 
@@ -4395,6 +4398,10 @@ where
 		self.is_manual_broadcast
 	}
 
+	pub fn is_trusted_no_broadcast(&self) -> bool {
+		self.trusted_no_broadcast
+	}
+
 	pub fn get_cltv_expiry_delta(&self) -> u16 {
 		cmp::max(self.config.options.cltv_expiry_delta, MIN_CLTV_EXPIRY_DELTA)
 	}
@@ -4510,10 +4517,16 @@ where
 	///
 	/// This is useful if you wish to get hold of the funding transaction before it is broadcasted
 	/// via [`Event::FundingTxBroadcastSafe`] event.
+	/// Virtual channels also set this flag, but
+	/// do not emit [`Event::FundingTxBroadcastSafe`].
 	///
 	/// [`Event::FundingTxBroadcastSafe`]: crate::events::Event::FundingTxBroadcastSafe
 	pub fn set_manual_broadcast(&mut self) {
 		self.is_manual_broadcast = true;
+	}
+
+	pub fn set_trusted_no_broadcast(&mut self) {
+		self.trusted_no_broadcast = true;
 	}
 
 	fn can_resume_on_reconnect(&self) -> bool {
@@ -5079,7 +5092,7 @@ where
 				&holder_keys.broadcaster_delayed_payment_key,
 				&holder_keys.revocation_key,
 			);
-			if self.is_colored() {
+			if self.is_colored() && !self.is_trusted_no_broadcast() {
 				color_htlc(&mut htlc_tx, htlc, &self.ldk_data_dir)
 					.expect("successful htlc coloring");
 			}
@@ -11566,7 +11579,8 @@ where
 					self.context.minimum_depth.unwrap(), funding_tx_confirmations);
 				return Err(ClosureReason::ProcessingError { err: err_reason });
 			}
-		} else if !self.funding.is_outbound() && self.funding.funding_tx_confirmed_in.is_none() &&
+		} else if !self.context.is_trusted_no_broadcast() &&
+				!self.funding.is_outbound() && self.funding.funding_tx_confirmed_in.is_none() &&
 				height >= self.context.channel_creation_height + FUNDING_CONF_DEADLINE_BLOCKS {
 			log_info!(logger, "Closing channel {} due to funding timeout", &self.context.channel_id);
 			// If funding_tx_confirmed_in is unset, the channel must not be active
@@ -14994,6 +15008,7 @@ where
 			monitor_pending_update_adds = Some(&self.context.monitor_pending_update_adds);
 		}
 		let is_manual_broadcast = Some(self.context.is_manual_broadcast);
+		let trusted_no_broadcast = Some(self.context.trusted_no_broadcast);
 
 		let holder_commitment_point_current = self.holder_commitment_point.current_point();
 		let holder_commitment_point_next = self.holder_commitment_point.next_point();
@@ -15057,6 +15072,7 @@ where
 			(67, pending_outbound_held_htlc_flags, optional_vec), // Added in 0.2
 			(69, holding_cell_held_htlc_flags, optional_vec), // Added in 0.2
 			(71, self.context.consignment_endpoint, option),
+			(73, trusted_no_broadcast, option),
 		});
 
 		Ok(())
@@ -15416,6 +15432,7 @@ where
 		let mut holder_commitment_point_next_opt: Option<PublicKey> = None;
 		let mut holder_commitment_point_pending_next_opt: Option<PublicKey> = None;
 		let mut is_manual_broadcast = None;
+		let mut trusted_no_broadcast = None;
 
 		let mut historical_scids = Some(Vec::new());
 
@@ -15476,6 +15493,7 @@ where
 			(67, pending_outbound_held_htlc_flags_opt, optional_vec), // Added in 0.2
 			(69, holding_cell_held_htlc_flags_opt, optional_vec), // Added in 0.2
 			(71, consignment_endpoint, option),
+			(73, trusted_no_broadcast, option),
 		});
 
 		let holder_signer = signer_provider.derive_channel_signer(channel_keys_id);
@@ -15863,6 +15881,7 @@ where
 
 				blocked_monitor_updates: blocked_monitor_updates.unwrap(),
 				is_manual_broadcast: is_manual_broadcast.unwrap_or(false),
+				trusted_no_broadcast: trusted_no_broadcast.unwrap_or(false),
 
 				interactive_tx_signing_session,
 

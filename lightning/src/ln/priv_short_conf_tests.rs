@@ -13,7 +13,7 @@
 
 use crate::chain::ChannelMonitorUpdateStatus;
 use crate::events::{ClosureReason, Event, HTLCHandlingFailureType};
-use crate::ln::channelmanager::{PaymentId, RecipientOnionFields, MIN_CLTV_EXPIRY_DELTA};
+use crate::ln::channelmanager::{self, PaymentId, RecipientOnionFields, MIN_CLTV_EXPIRY_DELTA};
 use crate::ln::msgs;
 use crate::ln::msgs::{
 	BaseMessageHandler, ChannelMessageHandler, ErrorAction, MessageSendEvent, RoutingMessageHandler,
@@ -822,6 +822,7 @@ fn test_0conf_channel_with_async_monitor() {
 					&node_a_id,
 					0,
 					None,
+					channelmanager::ChannelFundingType::Regular,
 				)
 				.unwrap();
 		},
@@ -1245,7 +1246,8 @@ fn test_zero_conf_accept_reject() {
 					&temporary_channel_id,
 					&node_a_id,
 					0,
-					None
+					None,
+					channelmanager::ChannelFundingType::Regular
 				)
 				.is_ok());
 		},
@@ -1291,6 +1293,7 @@ fn test_connect_before_funding() {
 					&node_a_id,
 					0,
 					None,
+					channelmanager::ChannelFundingType::Regular,
 				)
 				.unwrap();
 		},

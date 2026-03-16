@@ -19,7 +19,7 @@ use crate::events::{ClosureReason, Event};
 use crate::ln::chan_utils::ClosingTransaction;
 use crate::ln::channel::DISCONNECT_PEER_AWAITING_RESPONSE_TICKS;
 use crate::ln::channel_state::{ChannelDetails, ChannelShutdownState};
-use crate::ln::channelmanager::{PaymentId, RAACommitmentOrder, RecipientOnionFields};
+use crate::ln::channelmanager::{self, PaymentId, RAACommitmentOrder, RecipientOnionFields};
 use crate::ln::msgs::{BaseMessageHandler, ChannelMessageHandler, MessageSendEvent};
 use crate::ln::{functional_test_utils::*, msgs};
 use crate::sign::ecdsa::EcdsaChannelSigner;
@@ -81,6 +81,7 @@ fn do_test_open_channel(zero_conf: bool) {
 						&node_a_id,
 						0,
 						None,
+						channelmanager::ChannelFundingType::Regular,
 					)
 					.expect("Unable to accept inbound zero-conf channel");
 			},
@@ -390,6 +391,7 @@ fn do_test_funding_signed_0conf(signer_ops: Vec<SignerOp>) {
 						&node_a_id,
 						0,
 						None,
+						channelmanager::ChannelFundingType::Regular,
 					)
 					.expect("Unable to accept inbound zero-conf channel");
 			},

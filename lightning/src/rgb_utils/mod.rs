@@ -51,6 +51,7 @@ pub const WALLET_ACCOUNT_XPUB_COLORED_FNAME: &str = "wallet_account_xpub_colored
 pub const WALLET_MASTER_FINGERPRINT_FNAME: &str = "wallet_master_fingerprint";
 const INBOUND_EXT: &str = "inbound";
 const OUTBOUND_EXT: &str = "outbound";
+const VIRTUAL_CHANNEL_MARKER_PREFIX: &str = "virtual_channel_";
 
 /// RGB channel info
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -342,6 +343,10 @@ where
 		last_rgb_payment_info = Some(rgb_payment_info);
 	}
 
+	if channel_context.is_trusted_no_broadcast() {
+		return Ok(());
+	}
+
 	let (local_amt, remote_amt) = if let Some(last_rgb_payment_info) = last_rgb_payment_info {
 		(
 			last_rgb_payment_info.local_rgb_amount - rgb_offered_htlc,
@@ -582,6 +587,11 @@ pub fn get_rgb_channel_info_pending(
 	get_rgb_channel_info(&channel_id.0.as_hex().to_string(), ldk_data_dir, true)
 }
 
+/// Get marker file path used to identify trusted virtual channels for routing policy.
+pub fn get_virtual_channel_marker_path(channel_id: &str, ldk_data_dir: &Path) -> PathBuf {
+	ldk_data_dir.join(format!("{VIRTUAL_CHANNEL_MARKER_PREFIX}{channel_id}"))
+}
+
 /// Parse RgbInfo
 pub fn parse_rgb_channel_info(rgb_channel_info_path: &PathBuf) -> RgbInfo {
 	let serialized_info = fs::read_to_string(rgb_channel_info_path).expect("valid rgb info file");
@@ -791,5 +801,17 @@ pub(crate) fn filter_first_hops(
 			serde_json::from_str(&serialized_info).expect("valid rgb info file");
 		rgb_info.contract_id == contract_id && rgb_info.local_rgb_amount >= rgb_amount
 	});
+	let has_virtual_rgb_hop = first_hops.iter().any(|h| {
+		let marker =
+			get_virtual_channel_marker_path(&h.channel_id.0.as_hex().to_string(), ldk_data_dir);
+		marker.exists()
+	});
+	if has_virtual_rgb_hop {
+		first_hops.retain(|h| {
+			let marker =
+				get_virtual_channel_marker_path(&h.channel_id.0.as_hex().to_string(), ldk_data_dir);
+			marker.exists()
+		});
+	}
 	(contract_id, rgb_amount)
 }
