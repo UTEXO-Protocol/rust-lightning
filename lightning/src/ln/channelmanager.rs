@@ -5288,24 +5288,29 @@ where
 		let prng_seed = self.entropy_source.get_secure_random_bytes();
 		let session_priv = SecretKey::from_slice(&session_priv_bytes[..]).expect("RNG is busted");
 
-		let (onion_packet, htlc_msat, htlc_cltv, htlc_rgb_payment) = onion_utils::create_payment_onion(
-			&self.secp_ctx,
-			&path,
-			&session_priv,
-			total_value,
-			recipient_onion,
-			cur_height,
-			payment_hash,
-			keysend_preimage,
-			invoice_request,
-			prng_seed,
-		)
-		.map_err(|e| {
-			let first_hop_key = Some(path.hops.first().unwrap().pubkey);
-			let logger = WithContext::from(&self.logger, first_hop_key, None, Some(*payment_hash));
-			log_error!(logger, "Failed to build an onion for path for payment hash {payment_hash}");
-			e
-		})?;
+		let (onion_packet, htlc_msat, htlc_cltv, htlc_rgb_payment) =
+			onion_utils::create_payment_onion(
+				&self.secp_ctx,
+				&path,
+				&session_priv,
+				total_value,
+				recipient_onion,
+				cur_height,
+				payment_hash,
+				keysend_preimage,
+				invoice_request,
+				prng_seed,
+			)
+			.map_err(|e| {
+				let first_hop_key = Some(path.hops.first().unwrap().pubkey);
+				let logger =
+					WithContext::from(&self.logger, first_hop_key, None, Some(*payment_hash));
+				log_error!(
+					logger,
+					"Failed to build an onion for path for payment hash {payment_hash}"
+				);
+				e
+			})?;
 
 		log_trace!(
 			self.logger,
@@ -8971,7 +8976,8 @@ where
 		ComplFunc: FnOnce(
 			Option<u64>,
 			bool,
-		) -> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
+		)
+			-> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
 	>(
 		&self, prev_hop: HTLCPreviousHopData, payment_preimage: PaymentPreimage,
 		payment_info: Option<PaymentClaimDetails>, attribution_data: Option<AttributionData>,
@@ -9009,7 +9015,8 @@ where
 		ComplFunc: FnOnce(
 			Option<u64>,
 			bool,
-		) -> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
+		)
+			-> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
 	>(
 		&self, prev_hop: HTLCClaimSource, payment_preimage: PaymentPreimage,
 		payment_info: Option<PaymentClaimDetails>, attribution_data: Option<AttributionData>,
@@ -11165,7 +11172,13 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	) -> Result<(), MsgHandleErrInternal> {
 		let funding_txo;
 		let next_user_channel_id;
-		let (htlc_source, forwarded_htlc_value, skimmed_fee_msat, send_timestamp, forwarded_htlc_rgb) = {
+		let (
+			htlc_source,
+			forwarded_htlc_value,
+			skimmed_fee_msat,
+			send_timestamp,
+			forwarded_htlc_rgb,
+		) = {
 			let per_peer_state = self.per_peer_state.read().unwrap();
 			let peer_state_mutex = per_peer_state.get(counterparty_node_id).ok_or_else(|| {
 				debug_assert!(false);
@@ -11468,7 +11481,8 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							&self.fake_scid_rand_bytes,
 							scid,
 							&self.chain_hash,
-						) || fake_scid::is_valid_swap(scid)) {
+						) || fake_scid::is_valid_swap(scid))
+					{
 						let is_swap = fake_scid::is_valid_swap(scid);
 						let scid = if is_swap { fake_scid::get_real_swap_scid(scid) } else { scid };
 						let intercept_id = InterceptId::from_incoming_shared_secret(
@@ -17323,8 +17337,11 @@ where
 			}
 			pending_outbound_payments = Some(outbounds);
 		}
-		let pending_outbounds =
-			OutboundPayments::new(pending_outbound_payments.unwrap(), args.logger.clone(), args.ldk_data_dir.clone());
+		let pending_outbounds = OutboundPayments::new(
+			pending_outbound_payments.unwrap(),
+			args.logger.clone(),
+			args.ldk_data_dir.clone(),
+		);
 
 		for (peer_pubkey, peer_storage) in peer_storage_dir {
 			if let Some(peer_state) = per_peer_state.get_mut(&peer_pubkey) {

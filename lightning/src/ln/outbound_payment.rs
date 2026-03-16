@@ -1246,8 +1246,11 @@ where
 						.with_user_config_ignoring_fee_limit(*route_params_config);
 					// TODO: retrieve when adding RGB support for offers
 					let rgb_payment = None;
-					let mut route_params =
-						RouteParameters::from_payment_params_and_value(pay_params, amount_msat, rgb_payment);
+					let mut route_params = RouteParameters::from_payment_params_and_value(
+						pay_params,
+						amount_msat,
+						rgb_payment,
+					);
 					route_params.max_total_routing_fee_msat =
 						route_params_config.max_total_routing_fee_msat;
 

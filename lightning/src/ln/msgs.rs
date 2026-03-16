@@ -3463,7 +3463,12 @@ impl Readable for FinalOnionHopData {
 impl<'a> Writeable for OutboundOnionPayload<'a> {
 	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
 		match self {
-			Self::Forward { short_channel_id, amt_to_forward, outgoing_cltv_value, rgb_payment_to_forward } => {
+			Self::Forward {
+				short_channel_id,
+				amt_to_forward,
+				outgoing_cltv_value,
+				rgb_payment_to_forward,
+			} => {
 				_encode_varint_length_prefixed_tlv!(w, {
 					(2, HighZeroBytesDroppedBigSize(*amt_to_forward), required),
 					(4, HighZeroBytesDroppedBigSize(*outgoing_cltv_value), required),
@@ -3523,7 +3528,11 @@ impl<'a> Writeable for OutboundOnionPayload<'a> {
 					(22, rgb_payment_to_forward, option)
 				}, custom_tlvs.iter());
 			},
-			Self::BlindedForward { encrypted_tlvs, intro_node_blinding_point, rgb_payment_to_forward } => {
+			Self::BlindedForward {
+				encrypted_tlvs,
+				intro_node_blinding_point,
+				rgb_payment_to_forward,
+			} => {
 				_encode_varint_length_prefixed_tlv!(w, {
 					(10, *encrypted_tlvs, required_vec),
 					(12, intro_node_blinding_point, option),
@@ -3731,7 +3740,8 @@ where
 						}),
 				} => {
 					if amt.is_some()
-						|| cltv_value.is_some() || total_msat.is_some()
+						|| cltv_value.is_some()
+						|| total_msat.is_some()
 						|| keysend_preimage.is_some()
 						|| invoice_request.is_some()
 					{
@@ -3885,7 +3895,8 @@ where
 						}),
 				} => {
 					if amt.is_some()
-						|| cltv_value.is_some() || total_msat.is_some()
+						|| cltv_value.is_some()
+						|| total_msat.is_some()
 						|| keysend_preimage.is_some()
 						|| invoice_request.is_some()
 					{

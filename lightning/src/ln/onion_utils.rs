@@ -222,8 +222,7 @@ trait OnionPayload<'a, 'b> {
 		sender_intended_htlc_amt_msat: u64, total_msat: u64, cltv_expiry_height: u32,
 		encrypted_tlvs: &'a Vec<u8>, intro_node_blinding_point: Option<PublicKey>,
 		keysend_preimage: Option<PaymentPreimage>, invoice_request: Option<&'a InvoiceRequest>,
-		custom_tlvs: &'a Vec<(u64, Vec<u8>)>,
-		rgb_payment_to_forward: Option<(ContractId, u64)>,
+		custom_tlvs: &'a Vec<(u64, Vec<u8>)>, rgb_payment_to_forward: Option<(ContractId, u64)>,
 	) -> Self;
 	fn new_trampoline_entry(
 		total_msat: u64, amt_to_forward: u64, outgoing_cltv_value: u32,
@@ -233,8 +232,16 @@ trait OnionPayload<'a, 'b> {
 impl<'a, 'b> OnionPayload<'a, 'b> for msgs::OutboundOnionPayload<'a> {
 	type PathHopForId = &'b RouteHop;
 	type ReceiveType = msgs::OutboundOnionPayload<'a>;
-	fn new_forward(short_channel_id: u64, amt_to_forward: u64, outgoing_cltv_value: u32, rgb_payment_to_forward: Option<(ContractId, u64)>) -> Self {
-		Self::Forward { short_channel_id, amt_to_forward, outgoing_cltv_value, rgb_payment_to_forward }
+	fn new_forward(
+		short_channel_id: u64, amt_to_forward: u64, outgoing_cltv_value: u32,
+		rgb_payment_to_forward: Option<(ContractId, u64)>,
+	) -> Self {
+		Self::Forward {
+			short_channel_id,
+			amt_to_forward,
+			outgoing_cltv_value,
+			rgb_payment_to_forward,
+		}
 	}
 	fn new_receive(
 		recipient_onion: &'a RecipientOnionFields, keysend_preimage: Option<PaymentPreimage>,
@@ -263,8 +270,7 @@ impl<'a, 'b> OnionPayload<'a, 'b> for msgs::OutboundOnionPayload<'a> {
 		sender_intended_htlc_amt_msat: u64, total_msat: u64, cltv_expiry_height: u32,
 		encrypted_tlvs: &'a Vec<u8>, intro_node_blinding_point: Option<PublicKey>,
 		keysend_preimage: Option<PaymentPreimage>, invoice_request: Option<&'a InvoiceRequest>,
-		custom_tlvs: &'a Vec<(u64, Vec<u8>)>,
-		rgb_payment_to_forward: Option<(ContractId, u64)>,
+		custom_tlvs: &'a Vec<(u64, Vec<u8>)>, rgb_payment_to_forward: Option<(ContractId, u64)>,
 	) -> Self {
 		Self::BlindedReceive {
 			sender_intended_htlc_amt_msat,
@@ -321,8 +327,7 @@ impl<'a, 'b> OnionPayload<'a, 'b> for msgs::OutboundTrampolinePayload<'a> {
 		sender_intended_htlc_amt_msat: u64, total_msat: u64, cltv_expiry_height: u32,
 		encrypted_tlvs: &'a Vec<u8>, intro_node_blinding_point: Option<PublicKey>,
 		keysend_preimage: Option<PaymentPreimage>, _invoice_request: Option<&'a InvoiceRequest>,
-		custom_tlvs: &'a Vec<(u64, Vec<u8>)>,
-		_rgb_payment_to_forward: Option<(ContractId, u64)>,
+		custom_tlvs: &'a Vec<(u64, Vec<u8>)>, _rgb_payment_to_forward: Option<(ContractId, u64)>,
 	) -> Self {
 		Self::BlindedReceive {
 			sender_intended_htlc_amt_msat,
