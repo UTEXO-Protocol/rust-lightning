@@ -162,6 +162,16 @@ pub struct ChannelHandshakeConfig {
 	///                will be treated as one million instead, although channel negotiations will
 	///                fail in that case.)
 	pub their_channel_reserve_proportional_millionths: u32,
+	/// If set, overrides the counterparty channel reserve (sent in OpenChannel) with this exact
+	/// value in satoshis, bypassing the minimum.
+	/// Use only for virtual channels where you want the client to have zero balance
+	/// so that close conditions can be met.
+	///
+	/// When `Some(0)`, the counterparty has no reserve and can send all BTC back; this is only
+	/// safe when the channel is never broadcast, virtual channels.
+	///
+	/// Default value: `None` (use proportional reserve with regular minimum.)
+	pub their_channel_reserve_satoshis_override: Option<u64>,
 	/// If set, we attempt to negotiate the `anchors_zero_fee_htlc_tx`option for all future
 	/// channels. This feature requires having a reserve of onchain funds readily available to bump
 	/// transactions in the event of a channel force close to avoid the possibility of losing funds.
@@ -254,6 +264,7 @@ impl Default for ChannelHandshakeConfig {
 			announce_for_forwarding: false,
 			commit_upfront_shutdown_pubkey: true,
 			their_channel_reserve_proportional_millionths: 10_000,
+			their_channel_reserve_satoshis_override: None,
 			negotiate_anchors_zero_fee_htlc_tx: false,
 			negotiate_anchor_zero_fee_commitments: false,
 			our_max_accepted_htlcs: 50,
@@ -276,6 +287,14 @@ impl Readable for ChannelHandshakeConfig {
 			announce_for_forwarding: Readable::read(reader)?,
 			commit_upfront_shutdown_pubkey: Readable::read(reader)?,
 			their_channel_reserve_proportional_millionths: Readable::read(reader)?,
+			their_channel_reserve_satoshis_override: {
+				let v: u64 = Readable::read(reader)?;
+				if v == u64::MAX {
+					None
+				} else {
+					Some(v)
+				}
+			},
 			negotiate_anchors_zero_fee_htlc_tx: Readable::read(reader)?,
 			negotiate_anchor_zero_fee_commitments: Readable::read(reader)?,
 			our_max_accepted_htlcs: Readable::read(reader)?,

@@ -4381,6 +4381,11 @@ where
 
 			match peer_state.channel_by_id.entry(*chan_id) {
 				hash_map::Entry::Occupied(mut chan_entry) => {
+					if chan_entry.get().context().is_trusted_no_broadcast() {
+						return Err(APIError::APIMisuseError {
+							err: "trusted no-broadcast channels must use abandon_virtual_channel".to_owned(),
+						});
+					}
 					if !chan_entry.get().context().is_connected() {
 						return Err(APIError::ChannelUnavailable {
 							err: "Cannot begin shutdown while peer is disconnected, maybe force-close instead?".to_owned(),
@@ -4512,6 +4517,76 @@ where
 			target_feerate_sats_per_1000_weight,
 			shutdown_script,
 		)
+	}
+
+	/// Abandons a trusted no-broadcast, virtual channel whose funding has not been observed on-chain.
+	///
+	/// This is intended for channels created via the trusted no-broadcast manual funding path and
+	/// will fail unless:
+	///  * `dangerous_ack` is `true`,
+	///  * the channel is flagged `trusted_no_broadcast`,
+	///  * the funding transaction is still unconfirmed and has never been observed on-chain, and
+	///  * there are no in-flight HTLCs on the channel.
+	pub fn abandon_virtual_channel(
+		&self, channel_id: &ChannelId, client_node_id: &PublicKey, dangerous_ack: bool,
+	) -> Result<(), APIError> {
+		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
+		if !dangerous_ack {
+			return Err(APIError::APIMisuseError {
+				err: "virtual channel abandonment requires dangerous_ack=true".to_owned(),
+			});
+		}
+
+		let best_block_height = self.best_block.read().unwrap().height;
+		let per_peer_state = self.per_peer_state.read().unwrap();
+		let peer_state_mutex =
+			per_peer_state.get(client_node_id).ok_or_else(|| APIError::ChannelUnavailable {
+				err: format!(
+					"can't find a peer matching the passed client node_id {client_node_id}"
+				),
+			})?;
+		let mut peer_state_lock = peer_state_mutex.lock().unwrap();
+		let peer_state = &mut *peer_state_lock;
+
+		match peer_state.channel_by_id.entry(*channel_id) {
+			hash_map::Entry::Occupied(chan_entry) => {
+				if !chan_entry.get().context().is_trusted_no_broadcast() {
+					return Err(APIError::APIMisuseError {
+						err: "channel is not a trusted no-broadcast, virtual channel".to_owned(),
+					});
+				}
+				let funding = chan_entry.get().funding();
+				if funding.get_funding_tx_confirmations(best_block_height) != 0
+					|| funding.was_funding_tx_confirmed()
+				{
+					return Err(APIError::APIMisuseError {
+						err: "channel funding was already observed on-chain".to_owned(),
+					});
+				}
+				if chan_entry.get().has_inflight_htlcs() {
+					return Err(APIError::APIMisuseError {
+						err: "virtual channel still has in-flight HTLCs".to_owned(),
+					});
+				}
+
+				let reason = ClosureReason::VirtualChannelAbandoned;
+				let err = ChannelError::Close((reason.to_string(), reason));
+				let mut chan = chan_entry.remove();
+				let (close, mut e) = convert_channel_err!(self, peer_state, err, &mut chan);
+				debug_assert!(close);
+				e.err.action = msgs::ErrorAction::IgnoreError;
+				mem::drop(peer_state_lock);
+				mem::drop(per_peer_state);
+				let _ = handle_error!(self, Err::<(), _>(e), *client_node_id);
+				Ok(())
+			},
+			hash_map::Entry::Vacant(_) => Err(APIError::ChannelUnavailable {
+				err: format!(
+					"Channel with id {} not found for the passed client node_id {}",
+					channel_id, client_node_id,
+				),
+			}),
+		}
 	}
 
 	/// Applies a [`ChannelMonitorUpdate`] which may or may not be for a channel which is closed.
@@ -4731,6 +4806,20 @@ where
 	pub fn force_close_broadcasting_latest_txn(
 		&self, channel_id: &ChannelId, counterparty_node_id: &PublicKey, error_message: String,
 	) -> Result<(), APIError> {
+		let per_peer_state = self.per_peer_state.read().unwrap();
+		if let Some(peer_state_mutex) = per_peer_state.get(counterparty_node_id) {
+			let peer_state = peer_state_mutex.lock().unwrap();
+			if peer_state
+				.channel_by_id
+				.get(channel_id)
+				.is_some_and(|chan| chan.context().is_trusted_no_broadcast())
+			{
+				return Err(APIError::APIMisuseError {
+					err: "trusted no-broadcast channels must use abandon_virtual_channel"
+						.to_owned(),
+				});
+			}
+		}
 		self.force_close_sending_error(channel_id, counterparty_node_id, error_message)
 	}
 

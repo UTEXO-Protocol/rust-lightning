@@ -430,6 +430,11 @@ pub enum ClosureReason {
 		/// [`FeeEstimator`]: crate::chain::chaininterface::FeeEstimator
 		required_feerate_sat_per_kw: u32,
 	},
+	/// We abandoned a trusted no-broadcast, virtual channel before its funding transaction was ever observed on-chain.
+	///
+	/// Note that events containing this variant will be lost on downgrade to a version of LDK
+	/// prior to 0.2.
+	VirtualChannelAbandoned,
 }
 
 impl core::fmt::Display for ClosureReason {
@@ -501,6 +506,9 @@ impl core::fmt::Display for ClosureReason {
 				"peer provided a feerate ({} sat/kw) which was below our lower bound ({} sat/kw)",
 				peer_feerate_sat_per_kw, required_feerate_sat_per_kw,
 			)),
+			ClosureReason::VirtualChannelAbandoned => f.write_str(
+				"we abandoned a trusted no-broadcast, virtual channel before funding was observed on-chain",
+			),
 		}
 	}
 }
@@ -529,6 +537,7 @@ impl_writeable_tlv_based_enum_upgradable!(ClosureReason,
 		(2, required_feerate_sat_per_kw, required),
 	},
 	(25, LocallyCoopClosedUnfundedChannel) => {},
+	(27, VirtualChannelAbandoned) => {},
 );
 
 /// The type of HTLC handling performed in [`Event::HTLCHandlingFailed`].

@@ -490,6 +490,20 @@ pub struct ChannelDetails {
 
 	/// The largest RGB value HTLC we currently will accept, for this channel.
 	pub inbound_htlc_maximum_rgb: u64,
+
+	/// A lower bound on the counterparty's current BTC balance, in satoshis. Computed from both
+	/// our local and our counterparty's remote commitment transactions, including fees at the
+	/// current feerate.
+	pub counterparty_balance_sats_floor: Option<u64>,
+
+	/// A lower bound on the holder's current BTC balance, in satoshis. Computed from both our
+	/// local and our counterparty's remote commitment transactions, including fees at the
+	/// current feerate.
+	pub holder_balance_sats_floor: Option<u64>,
+
+	/// Used for virtual channels (trusted no-broadcast mode) where the funding transaction
+	/// is not broadcast on-chain.
+	pub trusted_no_broadcast: bool,
 }
 
 impl ChannelDetails {
@@ -543,6 +557,10 @@ impl ChannelDetails {
 		let balance = channel.get_available_balances(fee_estimator);
 		let (to_remote_reserve_satoshis, to_self_reserve_satoshis) =
 			funding.get_holder_counterparty_selected_channel_reserve_satoshis();
+
+		let (holder_balance_sats_floor, counterparty_balance_sats_floor) =
+			channel.get_balance_sats_floors();
+
 		#[allow(deprecated)] // TODO: Remove once balance_msat is removed.
 		ChannelDetails {
 			channel_id: context.channel_id(),
@@ -604,6 +622,9 @@ impl ChannelDetails {
 			pending_outbound_htlcs: context.get_pending_outbound_htlc_details(funding),
 			next_outbound_htlc_limit_rgb: context.get_local_rgb_amount(),
 			inbound_htlc_maximum_rgb: context.get_remote_rgb_amount(),
+			counterparty_balance_sats_floor,
+			holder_balance_sats_floor,
+			trusted_no_broadcast: context.is_trusted_no_broadcast(),
 		}
 	}
 }
@@ -649,6 +670,9 @@ impl_writeable_tlv_based!(ChannelDetails, {
 	)),
 	(48, next_outbound_htlc_limit_rgb, required),
 	(50, inbound_htlc_maximum_rgb, required),
+	(52, counterparty_balance_sats_floor, option),
+	(54, holder_balance_sats_floor, option),
+	(56, trusted_no_broadcast, (default_value, false)),
 });
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -766,6 +790,11 @@ mod tests {
 				skimmed_fee_msat: Some(42),
 				is_dust: false,
 			}],
+			trusted_no_broadcast: true,
+			holder_balance_sats_floor: Some(3000),
+			counterparty_balance_sats_floor: Some(0),
+			next_outbound_htlc_limit_rgb: 0,
+			inbound_htlc_maximum_rgb: 0,
 		};
 		let mut buffer = Vec::new();
 		channel_details.write(&mut buffer).unwrap();
