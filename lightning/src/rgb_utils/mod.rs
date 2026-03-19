@@ -271,7 +271,6 @@ where
 	let (rgb_info, _) = get_rgb_channel_info_pending(channel_id, ldk_data_dir);
 	let contract_id = rgb_info.contract_id;
 
-	let chan_id = channel_id.0.as_hex();
 	let mut rgb_offered_htlc = 0;
 	let mut rgb_received_htlc = 0;
 	let mut last_rgb_payment_info = None;
@@ -288,33 +287,68 @@ where
 		let inbound = htlc.offered == counterparty;
 
 		let htlc_payment_hash = htlc.payment_hash.0.as_hex().to_string();
-		let htlc_proxy_id = format!("{chan_id}{htlc_payment_hash}");
-		let mut rgb_payment_info_proxy_id_path = ldk_data_dir.join(htlc_proxy_id);
-		let rgb_payment_info_path = ldk_data_dir.join(htlc_payment_hash);
-		let mut rgb_payment_info_path = rgb_payment_info_path.clone();
+		let mut rgb_payment_info_path = ldk_data_dir.join(htlc_payment_hash);
 		if inbound {
-			rgb_payment_info_proxy_id_path.set_extension(INBOUND_EXT);
 			rgb_payment_info_path.set_extension(INBOUND_EXT);
 		} else {
-			rgb_payment_info_proxy_id_path.set_extension(OUTBOUND_EXT);
 			rgb_payment_info_path.set_extension(OUTBOUND_EXT);
 		}
-		let rgb_payment_info_tmp_path = _append_pending_extension(&rgb_payment_info_path);
+		let rgb_payment_info_tmp_path =
+			get_rgb_payment_info_pending_path(&htlc.payment_hash, ldk_data_dir, inbound);
+		let channel_rgb_payment_info_path = get_rgb_channel_payment_info_path(
+			channel_id,
+			&htlc.payment_hash,
+			ldk_data_dir,
+			inbound,
+			false,
+		);
+		let channel_pending_rgb_payment_info_path = get_rgb_channel_payment_info_path(
+			channel_id,
+			&htlc.payment_hash,
+			ldk_data_dir,
+			inbound,
+			true,
+		);
+		let is_compatible_rgb_payment_info = |rgb_payment_info: &RgbPaymentInfo| {
+			rgb_payment_info.contract_id == contract_id
+				&& rgb_payment_info.amount == htlc_amount_rgb
+				&& rgb_payment_info.inbound == inbound
+		};
 
-		if rgb_payment_info_tmp_path.exists() {
-			let mut rgb_payment_info = parse_rgb_payment_info(&rgb_payment_info_tmp_path);
-			rgb_payment_info.local_rgb_amount = rgb_info.local_rgb_amount;
-			rgb_payment_info.remote_rgb_amount = rgb_info.remote_rgb_amount;
-			let serialized_info =
-				serde_json::to_string(&rgb_payment_info).expect("valid rgb payment info");
-			fs::write(&rgb_payment_info_proxy_id_path, serialized_info)
-				.expect("able to write rgb payment info file");
-			fs::remove_file(rgb_payment_info_tmp_path).expect("able to remove file");
+		let mut rgb_payment_info = None;
+		let mut should_persist_channel_info = false;
+		let mut used_raw_rgb_payment_info_tmp = false;
+
+		if channel_rgb_payment_info_path.exists() {
+			let candidate = parse_rgb_payment_info(&channel_rgb_payment_info_path);
+			if is_compatible_rgb_payment_info(&candidate) {
+				rgb_payment_info = Some(candidate);
+			}
 		}
-
-		let rgb_payment_info = if rgb_payment_info_proxy_id_path.exists() {
-			parse_rgb_payment_info(&rgb_payment_info_proxy_id_path)
-		} else {
+		if rgb_payment_info.is_none() && channel_pending_rgb_payment_info_path.exists() {
+			let candidate = parse_rgb_payment_info(&channel_pending_rgb_payment_info_path);
+			if is_compatible_rgb_payment_info(&candidate) {
+				rgb_payment_info = Some(candidate);
+				should_persist_channel_info = true;
+			}
+		}
+		if rgb_payment_info.is_none() && rgb_payment_info_tmp_path.exists() {
+			let candidate = parse_rgb_payment_info(&rgb_payment_info_tmp_path);
+			if is_compatible_rgb_payment_info(&candidate) {
+				rgb_payment_info = Some(candidate);
+				should_persist_channel_info = true;
+				used_raw_rgb_payment_info_tmp = true;
+			}
+		}
+		if rgb_payment_info.is_none() && rgb_payment_info_path.exists() {
+			let candidate = parse_rgb_payment_info(&rgb_payment_info_path);
+			if is_compatible_rgb_payment_info(&candidate) {
+				rgb_payment_info = Some(candidate);
+				should_persist_channel_info = true;
+			}
+		}
+		let mut rgb_payment_info = rgb_payment_info.unwrap_or_else(|| {
+			should_persist_channel_info = true;
 			let rgb_payment_info = RgbPaymentInfo {
 				contract_id,
 				amount: htlc_amount_rgb,
@@ -325,12 +359,30 @@ where
 			};
 			let serialized_info =
 				serde_json::to_string(&rgb_payment_info).expect("valid rgb payment info");
-			fs::write(rgb_payment_info_proxy_id_path, serialized_info.clone())
-				.expect("able to write rgb payment info file");
-			fs::write(rgb_payment_info_path, serialized_info)
+			fs::write(&rgb_payment_info_path, serialized_info)
 				.expect("able to write rgb payment info file");
 			rgb_payment_info
-		};
+		});
+		if should_persist_channel_info {
+			rgb_payment_info.local_rgb_amount = rgb_info.local_rgb_amount;
+			rgb_payment_info.remote_rgb_amount = rgb_info.remote_rgb_amount;
+			let serialized_info =
+				serde_json::to_string(&rgb_payment_info).expect("valid rgb payment info");
+			fs::write(&channel_rgb_payment_info_path, serialized_info.clone())
+				.expect("able to write rgb payment info file");
+			fs::write(&channel_pending_rgb_payment_info_path, serialized_info)
+				.expect("able to write rgb payment info file");
+			if used_raw_rgb_payment_info_tmp && rgb_payment_info_tmp_path.exists() {
+				fs::remove_file(&rgb_payment_info_tmp_path).expect("able to remove file");
+			}
+		}
+
+		if !channel_pending_rgb_payment_info_path.exists() {
+			let serialized_info =
+				serde_json::to_string(&rgb_payment_info).expect("valid rgb payment info");
+			fs::write(&channel_pending_rgb_payment_info_path, serialized_info)
+				.expect("able to write rgb payment info file");
+		}
 
 		if inbound {
 			rgb_received_htlc += rgb_payment_info.amount
@@ -555,6 +607,28 @@ pub fn get_rgb_payment_info_path(
 	path
 }
 
+/// Get pending RgbPaymentInfo file path scoped only to the payment hash.
+pub fn get_rgb_payment_info_pending_path(
+	payment_hash: &PaymentHash, ldk_data_dir: &Path, inbound: bool,
+) -> PathBuf {
+	_append_pending_extension(&get_rgb_payment_info_path(payment_hash, ldk_data_dir, inbound))
+}
+
+/// Get channel-scoped RgbPaymentInfo file path for a payment attached to a concrete channel.
+pub fn get_rgb_channel_payment_info_path(
+	channel_id: &ChannelId, payment_hash: &PaymentHash, ldk_data_dir: &Path, inbound: bool,
+	pending: bool,
+) -> PathBuf {
+	let mut path =
+		ldk_data_dir.join(format!("{}{}", channel_id.0.as_hex(), payment_hash.0.as_hex()));
+	path.set_extension(if inbound { INBOUND_EXT } else { OUTBOUND_EXT });
+	if pending {
+		_append_pending_extension(&path)
+	} else {
+		path
+	}
+}
+
 /// Parse RgbPaymentInfo
 pub fn parse_rgb_payment_info(rgb_payment_info_path: &PathBuf) -> RgbPaymentInfo {
 	let serialized_info =
@@ -621,7 +695,8 @@ pub fn write_rgb_payment_info_file(
 	swap_payment: bool, inbound: bool,
 ) {
 	let rgb_payment_info_path = get_rgb_payment_info_path(payment_hash, ldk_data_dir, inbound);
-	let rgb_payment_info_tmp_path = _append_pending_extension(&rgb_payment_info_path);
+	let rgb_payment_info_tmp_path =
+		get_rgb_payment_info_pending_path(payment_hash, ldk_data_dir, inbound);
 	let rgb_payment_info = RgbPaymentInfo {
 		contract_id,
 		amount: amount_rgb,
