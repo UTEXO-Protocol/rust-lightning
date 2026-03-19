@@ -255,6 +255,7 @@ pub fn do_test<Out: test_logger::Output>(data: &[u8], out: Out) {
 							channel_shutdown_state: Some(ChannelShutdownState::NotShuttingDown),
 							pending_inbound_htlcs: Vec::new(),
 							pending_outbound_htlcs: Vec::new(),
+							has_inflight_htlcs: false,
 						});
 					}
 					Some(&$first_hops_vec[..])
