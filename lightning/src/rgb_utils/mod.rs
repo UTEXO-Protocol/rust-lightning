@@ -740,7 +740,7 @@ pub(crate) fn rename_rgb_files(
 /// Handle funding on the receiver side
 pub(crate) fn handle_funding(
 	temporary_channel_id: &ChannelId, funding_txid: String, ldk_data_dir: &Path,
-	consignment_endpoint: RgbTransport,
+	consignment_endpoint: RgbTransport, push_asset_amount: Option<u64>,
 ) -> Result<(), MsgHandleErrInternal> {
 	let handle = Handle::current();
 	let _ = handle.enter();
@@ -795,16 +795,17 @@ pub(crate) fn handle_funding(
 			*temporary_channel_id,
 		));
 	}
-	let remote_rgb_amount = match remote_rgb_assignments[0] {
+	let channel_rgb_amount = match remote_rgb_assignments[0] {
 		Assignment::Fungible(amt) => amt,
 		Assignment::NonFungible => 1,
 		_ => unreachable!("unsupported schema"),
 	};
+	let push_amount = push_asset_amount.unwrap_or(0);
 	let rgb_info = RgbInfo {
 		contract_id: consignment.contract_id(),
 		schema: AssetSchema::from_schema_id(consignment.schema_id()).unwrap(),
-		local_rgb_amount: 0,
-		remote_rgb_amount,
+		local_rgb_amount: push_amount,
+		remote_rgb_amount: channel_rgb_amount - push_amount,
 	};
 	let temporary_channel_id_str = temporary_channel_id.0.as_hex().to_string();
 	write_rgb_channel_info(

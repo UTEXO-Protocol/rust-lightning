@@ -2379,6 +2379,12 @@ pub(crate) struct FundingScope {
 	/// The minimum number of confirmations before the funding is locked. If set, this will override
 	/// [`ChannelContext::minimum_depth`].
 	minimum_depth_override: Option<u32>,
+
+	/// The consignment endpoint used to exchange the RGB consignment.
+	pub(super) consignment_endpoint: Option<RgbTransport>,
+
+	/// The RGB asset amount to push to the counterparty on channel open.
+	pub(super) push_asset_amount: Option<u64>,
 }
 
 impl Writeable for FundingScope {
@@ -2393,6 +2399,8 @@ impl Writeable for FundingScope {
 			(13, self.funding_tx_confirmation_height, required),
 			(15, self.short_channel_id, option),
 			(17, self.minimum_depth_override, option),
+			(19, self.consignment_endpoint, option),
+			(21, self.push_asset_amount, option),
 		});
 		Ok(())
 	}
@@ -2410,6 +2418,8 @@ impl Readable for FundingScope {
 		let mut funding_tx_confirmation_height = RequiredWrapper(None);
 		let mut short_channel_id = None;
 		let mut minimum_depth_override = None;
+		let mut consignment_endpoint = None;
+		let mut push_asset_amount = None;
 
 		read_tlv_fields!(reader, {
 			(1, value_to_self_msat, required),
@@ -2421,6 +2431,8 @@ impl Readable for FundingScope {
 			(13, funding_tx_confirmation_height, required),
 			(15, short_channel_id, option),
 			(17, minimum_depth_override, option),
+			(19, consignment_endpoint, option),
+			(21, push_asset_amount, option),
 		});
 
 		Ok(Self {
@@ -2437,6 +2449,8 @@ impl Readable for FundingScope {
 			funding_tx_confirmation_height: funding_tx_confirmation_height.0.unwrap(),
 			short_channel_id,
 			minimum_depth_override,
+			consignment_endpoint,
+			push_asset_amount,
 			#[cfg(any(test, fuzzing))]
 			next_local_fee: Mutex::new(PredictedNextFee::default()),
 			#[cfg(any(test, fuzzing))]
@@ -2624,6 +2638,8 @@ impl FundingScope {
 			funding_tx_confirmed_in: None,
 			minimum_depth_override: None,
 			short_channel_id: None,
+			consignment_endpoint: None,
+			push_asset_amount: None,
 		}
 	}
 
@@ -3155,8 +3171,7 @@ where
 	/// promotion.
 	pub interactive_tx_signing_session: Option<InteractiveTxSigningSession>,
 
-	/// The consignment endpoint used to exchange the RGB consignment
-	pub(super) consignment_endpoint: Option<RgbTransport>,
+	pub(super) is_colored: bool,
 
 	pub(crate) ldk_data_dir: PathBuf,
 }
@@ -3427,6 +3442,7 @@ where
 		msg_channel_reserve_satoshis: u64,
 		msg_push_msat: u64,
 		open_channel_fields: msgs::CommonOpenChannelFields,
+		push_asset_amount: Option<u64>,
 		ldk_data_dir: PathBuf,
 	) -> Result<(FundingScope, ChannelContext<SP>), ChannelError>
 		where
@@ -3635,6 +3651,8 @@ where
 			funding_tx_confirmation_height: 0,
 			short_channel_id: None,
 			minimum_depth_override: None,
+			consignment_endpoint: open_channel_fields.consignment_endpoint.clone(),
+			push_asset_amount,
 		};
 		let channel_context = ChannelContext {
 			user_id,
@@ -3749,7 +3767,7 @@ where
 
 			interactive_tx_signing_session: None,
 
-			consignment_endpoint: open_channel_fields.consignment_endpoint,
+			is_colored: funding.consignment_endpoint.is_some(),
 			ldk_data_dir,
 		};
 
@@ -3776,6 +3794,7 @@ where
 		_logger: L,
 		consignment_endpoint: Option<RgbTransport>,
 		ldk_data_dir: PathBuf,
+		push_asset_amount: Option<u64>,
 	) -> Result<(FundingScope, ChannelContext<SP>), APIError>
 		where
 			ES::Target: EntropySource,
@@ -3881,6 +3900,8 @@ where
 			funding_tx_confirmation_height: 0,
 			short_channel_id: None,
 			minimum_depth_override: None,
+			consignment_endpoint: consignment_endpoint.clone(),
+			push_asset_amount,
 		};
 		let channel_context = Self {
 			user_id,
@@ -3993,7 +4014,7 @@ where
 
 			interactive_tx_signing_session: None,
 
-			consignment_endpoint,
+			is_colored: funding.consignment_endpoint.is_some(),
 			ldk_data_dir,
 		};
 
@@ -4021,7 +4042,7 @@ where
 	}
 
 	pub fn is_colored(&self) -> bool {
-		self.consignment_endpoint.is_some()
+		self.is_colored
 	}
 
 	/// Gets the fee we'd want to charge for adding an HTLC output to this Channel
@@ -13609,7 +13630,7 @@ where
 	pub fn new<ES: Deref, F: Deref, L: Deref>(
 		fee_estimator: &LowerBoundedFeeEstimator<F>, entropy_source: &ES, signer_provider: &SP, counterparty_node_id: PublicKey, their_features: &InitFeatures,
 		channel_value_satoshis: u64, push_msat: u64, user_id: u128, config: &UserConfig, current_chain_height: u32,
-		outbound_scid_alias: u64, temporary_channel_id: Option<ChannelId>, logger: L, consignment_endpoint: Option<RgbTransport>, ldk_data_dir: PathBuf,
+		outbound_scid_alias: u64, temporary_channel_id: Option<ChannelId>, logger: L, consignment_endpoint: Option<RgbTransport>, ldk_data_dir: PathBuf, push_asset_amount: Option<u64>,
 	) -> Result<OutboundV1Channel<SP>, APIError>
 	where ES::Target: EntropySource,
 	      F::Target: FeeEstimator,
@@ -13651,6 +13672,7 @@ where
 			logger,
 			consignment_endpoint,
 			ldk_data_dir,
+			push_asset_amount,
 		)?;
 		let unfunded_context = UnfundedChannelContext {
 			unfunded_channel_age_ticks: 0,
@@ -13828,10 +13850,11 @@ where
 					None => Builder::new().into_script(),
 				}),
 				channel_type: Some(self.funding.get_channel_type().clone()),
-				consignment_endpoint: self.context.consignment_endpoint.clone(),
+				consignment_endpoint: self.funding.consignment_endpoint.clone(),
 			},
 			push_msat: self.funding.get_value_satoshis() * 1000 - self.funding.value_to_self_msat,
 			channel_reserve_satoshis: self.funding.holder_selected_channel_reserve_satoshis,
+			push_asset_amount: self.funding.push_asset_amount,
 		})
 	}
 
@@ -14027,6 +14050,7 @@ where
 			msg.channel_reserve_satoshis,
 			msg.push_msat,
 			msg.common_fields.clone(),
+			msg.push_asset_amount,
 			ldk_data_dir,
 		)?;
 		let unfunded_context = UnfundedChannelContext {
@@ -14271,6 +14295,7 @@ where
 			// ok to pass consignment_endpoint as None since this method is unused
 			None,
 			ldk_data_dir,
+			None,
 		)?;
 		let unfunded_context = UnfundedChannelContext {
 			unfunded_channel_age_ticks: 0,
@@ -14362,7 +14387,7 @@ where
 					None => Builder::new().into_script(),
 				}),
 				channel_type: Some(self.funding.get_channel_type().clone()),
-				consignment_endpoint: self.context.consignment_endpoint.clone(),
+				consignment_endpoint: self.funding.consignment_endpoint.clone(),
 			},
 			funding_feerate_sat_per_1000_weight: self.context.feerate_per_kw,
 			second_per_commitment_point,
@@ -14426,6 +14451,7 @@ where
 			counterparty_selected_channel_reserve_satoshis,
 			0 /* push_msat not used in dual-funding */,
 			msg.common_fields.clone(),
+			None,
 			ldk_data_dir,
 		)?;
 		let channel_id = ChannelId::v2_from_revocation_basepoints(
@@ -15110,8 +15136,9 @@ where
 			(65, self.quiescent_action, option), // Added in 0.2
 			(67, pending_outbound_held_htlc_flags, optional_vec), // Added in 0.2
 			(69, holding_cell_held_htlc_flags, optional_vec), // Added in 0.2
-			(71, self.context.consignment_endpoint, option),
-			(73, trusted_no_broadcast, option),
+			(71, self.funding.consignment_endpoint, option),
+			(73, self.funding.push_asset_amount, option),
+			(75, trusted_no_broadcast, option),
 		});
 
 		Ok(())
@@ -15448,6 +15475,7 @@ where
 		let mut temporary_channel_id: Option<ChannelId> = None;
 		let mut holder_max_accepted_htlcs: Option<u16> = None;
 		let mut consignment_endpoint: Option<RgbTransport> = None;
+		let mut push_asset_amount: Option<u64> = None;
 
 		let mut blocked_monitor_updates = Some(Vec::new());
 
@@ -15532,7 +15560,8 @@ where
 			(67, pending_outbound_held_htlc_flags_opt, optional_vec), // Added in 0.2
 			(69, holding_cell_held_htlc_flags_opt, optional_vec), // Added in 0.2
 			(71, consignment_endpoint, option),
-			(73, trusted_no_broadcast, option),
+			(73, push_asset_amount, option),
+			(75, trusted_no_broadcast, option),
 		});
 
 		let holder_signer = signer_provider.derive_channel_signer(channel_keys_id);
@@ -15811,6 +15840,8 @@ where
 				funding_tx_confirmation_height,
 				short_channel_id,
 				minimum_depth_override,
+				consignment_endpoint: consignment_endpoint.clone(),
+				push_asset_amount,
 			},
 			context: ChannelContext {
 				user_id,
@@ -15923,8 +15954,7 @@ where
 				trusted_no_broadcast: trusted_no_broadcast.unwrap_or(false),
 
 				interactive_tx_signing_session,
-
-				consignment_endpoint,
+				is_colored: consignment_endpoint.is_some(),
 				ldk_data_dir,
 			},
 			holder_commitment_point,
@@ -17915,6 +17945,8 @@ mod tests {
 			funding_tx_confirmation_height: 0,
 			short_channel_id: None,
 			minimum_depth_override: None,
+			consignment_endpoint: None,
+			push_asset_amount: None,
 		};
 		let post_channel_value =
 			funding.compute_post_splice_value(our_funding_contribution, their_funding_contribution);

@@ -299,6 +299,8 @@ pub struct OpenChannel {
 	pub push_msat: u64,
 	/// The minimum value unencumbered by HTLCs for the counterparty to keep in the channel
 	pub channel_reserve_satoshis: u64,
+	/// The amount of RGB assets to push to the counterparty as part of the open.
+	pub push_asset_amount: Option<u64>,
 }
 
 /// An [`open_channel2`] message to be sent by or received from the channel initiator.
@@ -3135,6 +3137,7 @@ impl Writeable for OpenChannel {
 			(0, self.common_fields.shutdown_scriptpubkey.as_ref().map(|s| WithoutLength(s)), option), // Don't encode length twice.
 			(1, self.common_fields.channel_type, option),
 			(2, self.common_fields.consignment_endpoint, option),
+			(3, self.push_asset_amount, option),
 		});
 		Ok(())
 	}
@@ -3164,10 +3167,12 @@ impl LengthReadable for OpenChannel {
 		let mut shutdown_scriptpubkey: Option<ScriptBuf> = None;
 		let mut channel_type: Option<ChannelTypeFeatures> = None;
 		let mut consignment_endpoint: Option<RgbTransport> = None;
+		let mut push_asset_amount: Option<u64> = None;
 		decode_tlv_stream!(r, {
 			(0, shutdown_scriptpubkey, (option, encoding: (ScriptBuf, WithoutLength))),
 			(1, channel_type, option),
 			(2, consignment_endpoint, option),
+			(3, push_asset_amount, option),
 		});
 		Ok(OpenChannel {
 			common_fields: CommonOpenChannelFields {
@@ -3193,6 +3198,7 @@ impl LengthReadable for OpenChannel {
 			},
 			push_msat,
 			channel_reserve_satoshis,
+			push_asset_amount,
 		})
 	}
 }
