@@ -38,6 +38,7 @@ use bitcoin::{secp256k1, Psbt, Sequence, Txid, WPubkeyHash, Witness};
 use lightning_invoice::RawBolt11Invoice;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::chain::transaction::OutPoint;
 use crate::crypto::utils::{hkdf_extract_expand_twice, sign, sign_with_aux_rand};
@@ -62,6 +63,7 @@ use crate::rgb_utils::color_htlc;
 use crate::types::features::ChannelTypeFeatures;
 use crate::types::payment::PaymentPreimage;
 use crate::util::async_poll::AsyncResult;
+use crate::util::persist::KVStoreSync;
 use crate::util::ser::{ReadableArgs, Writeable};
 use crate::util::transaction_utils;
 
@@ -1218,6 +1220,8 @@ pub struct InMemorySigner {
 	entropy_source: RandomBytes,
 	/// The LDK data directory
 	ldk_data_dir: PathBuf,
+	/// KVStore for RGB data persistence
+	rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 }
 
 impl PartialEq for InMemorySigner {
@@ -1248,6 +1252,7 @@ impl Clone for InMemorySigner {
 			channel_keys_id: self.channel_keys_id,
 			entropy_source: RandomBytes::new(self.get_secure_random_bytes()),
 			ldk_data_dir: self.ldk_data_dir.clone(),
+			rgb_kv_store: self.rgb_kv_store.clone(),
 		}
 	}
 }
@@ -1259,6 +1264,7 @@ impl InMemorySigner {
 		payment_key_v2: SecretKey, v2_remote_key_derivation: bool,
 		delayed_payment_base_key: SecretKey, htlc_base_key: SecretKey, commitment_seed: [u8; 32],
 		channel_keys_id: [u8; 32], ldk_data_dir: PathBuf, rand_bytes_unique_start: [u8; 32],
+		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> InMemorySigner {
 		InMemorySigner {
 			funding_key: sealed::MaybeTweakedSecretKey::from(funding_key),
@@ -1272,6 +1278,7 @@ impl InMemorySigner {
 			channel_keys_id,
 			entropy_source: RandomBytes::new(rand_bytes_unique_start),
 			ldk_data_dir,
+			rgb_kv_store,
 		}
 	}
 
@@ -1281,6 +1288,7 @@ impl InMemorySigner {
 		payment_key_v2: SecretKey, v2_remote_key_derivation: bool,
 		delayed_payment_base_key: SecretKey, htlc_base_key: SecretKey, commitment_seed: [u8; 32],
 		channel_keys_id: [u8; 32], ldk_data_dir: PathBuf, rand_bytes_unique_start: [u8; 32],
+		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> InMemorySigner {
 		InMemorySigner {
 			funding_key: sealed::MaybeTweakedSecretKey::from(funding_key),
@@ -1294,6 +1302,7 @@ impl InMemorySigner {
 			channel_keys_id,
 			entropy_source: RandomBytes::new(rand_bytes_unique_start),
 			ldk_data_dir,
+			rgb_kv_store,
 		}
 	}
 
@@ -1568,7 +1577,7 @@ impl EcdsaChannelSigner for InMemorySigner {
 				&keys.revocation_key,
 			);
 			if commitment_tx.is_colored() {
-				if let Err(_e) = color_htlc(&mut htlc_tx, htlc, &self.ldk_data_dir) {
+				if let Err(_e) = color_htlc(&mut htlc_tx, htlc, &self.ldk_data_dir, self.rgb_kv_store.as_ref()) {
 					return Err(());
 				}
 			}
@@ -1993,6 +2002,7 @@ pub struct KeysManager {
 	starting_time_secs: u64,
 	starting_time_nanos: u32,
 	ldk_data_dir: PathBuf,
+	rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 }
 
 impl KeysManager {
@@ -2021,6 +2031,7 @@ impl KeysManager {
 	pub fn new(
 		seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32,
 		v2_remote_key_derivation: bool, ldk_data_dir: PathBuf,
+		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Self {
 		// Constants for key derivation path indices used in this function.
 		const NODE_SECRET_INDEX: ChildNumber = ChildNumber::Hardened { index: 0 };
@@ -2115,6 +2126,7 @@ impl KeysManager {
 					starting_time_secs,
 					starting_time_nanos,
 					ldk_data_dir,
+					rgb_kv_store,
 				};
 				let secp_seed = res.get_secure_random_bytes();
 				res.secp_ctx.seeded_randomize(&secp_seed);
@@ -2234,6 +2246,7 @@ impl KeysManager {
 			params.clone(),
 			self.ldk_data_dir.clone(),
 			prng_seed,
+			self.rgb_kv_store.clone(),
 		)
 	}
 
@@ -2651,6 +2664,7 @@ impl PhantomKeysManager {
 	pub fn new(
 		seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32,
 		cross_node_seed: &[u8; 32], v2_remote_key_derivation: bool, ldk_data_dir: PathBuf,
+		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Self {
 		let inner = KeysManager::new(
 			seed,
@@ -2658,6 +2672,7 @@ impl PhantomKeysManager {
 			starting_time_nanos,
 			v2_remote_key_derivation,
 			ldk_data_dir,
+			rgb_kv_store,
 		);
 		let (inbound_key, phantom_key) = hkdf_extract_expand_twice(
 			b"LDK Inbound and Phantom Payment Key Expansion",

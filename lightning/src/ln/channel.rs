@@ -78,9 +78,8 @@ use crate::ln::types::ChannelId;
 use crate::ln::LN_MAX_MSG_LEN;
 use crate::offers::static_invoice::StaticInvoice;
 use crate::rgb_utils::{
-	color_closing, color_commitment, color_htlc, get_rgb_channel_info_path,
-	get_rgb_channel_info_pending, parse_rgb_channel_info, rename_rgb_files,
-	update_rgb_channel_amount_pending,
+	color_closing, color_commitment, color_htlc, get_rgb_channel_info_pending, rename_rgb_files,
+	update_rgb_channel_amount_pending, RgbKvStoreExt,
 };
 use crate::routing::gossip::NodeId;
 use crate::sign::ecdsa::EcdsaChannelSigner;
@@ -104,6 +103,8 @@ use crate::prelude::*;
 use crate::sign::type_resolver::ChannelSignerType;
 #[cfg(any(test, fuzzing, debug_assertions))]
 use crate::sync::Mutex;
+use crate::sync::Arc;
+use crate::util::persist::KVStoreSync;
 use core::ops::Deref;
 use core::time::Duration;
 use core::{cmp, fmt, mem};
@@ -3174,6 +3175,9 @@ where
 	pub(super) is_colored: bool,
 
 	pub(crate) ldk_data_dir: PathBuf,
+
+	/// KVStore for RGB data persistence
+	pub(crate) rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 }
 
 /// A channel struct implementing this trait can receive an initial counterparty commitment
@@ -3273,8 +3277,8 @@ where
 		let context = self.context_mut();
 		let temporary_channel_id = context.channel_id;
 		context.channel_id = channel_id;
-		if context.is_colored() {
-			rename_rgb_files(&context.channel_id, &temporary_channel_id, &context.ldk_data_dir);
+		if context.is_colored() && temporary_channel_id != channel_id {
+			rename_rgb_files(&context.channel_id, &temporary_channel_id, context.rgb_kv_store.as_ref());
 		}
 
 		assert!(!context.channel_state.is_monitor_update_in_progress()); // We have not had any monitor(s) yet to fail update!
@@ -3444,6 +3448,7 @@ where
 		open_channel_fields: msgs::CommonOpenChannelFields,
 		push_asset_amount: Option<u64>,
 		ldk_data_dir: PathBuf,
+		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<(FundingScope, ChannelContext<SP>), ChannelError>
 		where
 			ES::Target: EntropySource,
@@ -3769,6 +3774,7 @@ where
 
 			is_colored: funding.consignment_endpoint.is_some(),
 			ldk_data_dir,
+			rgb_kv_store,
 		};
 
 		Ok((funding, channel_context))
@@ -3795,6 +3801,7 @@ where
 		consignment_endpoint: Option<RgbTransport>,
 		ldk_data_dir: PathBuf,
 		push_asset_amount: Option<u64>,
+		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<(FundingScope, ChannelContext<SP>), APIError>
 		where
 			ES::Target: EntropySource,
@@ -4016,6 +4023,7 @@ where
 
 			is_colored: funding.consignment_endpoint.is_some(),
 			ldk_data_dir,
+			rgb_kv_store,
 		};
 
 		Ok((funding, channel_context))
@@ -4396,13 +4404,8 @@ where
 
 	/// Get the channel local RGB amount
 	pub fn get_local_rgb_amount(&self) -> u64 {
-		let info_file_path = get_rgb_channel_info_path(
-			&self.channel_id.0.as_hex().to_string(),
-			&self.ldk_data_dir,
-			false,
-		);
-		if info_file_path.exists() {
-			let rgb_info = parse_rgb_channel_info(&info_file_path);
+		let channel_id_str = self.channel_id.0.as_hex().to_string();
+		if let Ok(rgb_info) = self.rgb_kv_store.read_rgb_channel_info(&channel_id_str, false) {
 			rgb_info.local_rgb_amount
 		} else {
 			0
@@ -4411,13 +4414,8 @@ where
 
 	/// Get the channel remote RGB amount
 	pub fn get_remote_rgb_amount(&self) -> u64 {
-		let info_file_path = get_rgb_channel_info_path(
-			&self.channel_id.0.as_hex().to_string(),
-			&self.ldk_data_dir,
-			false,
-		);
-		if info_file_path.exists() {
-			let rgb_info = parse_rgb_channel_info(&info_file_path);
+		let channel_id_str = self.channel_id.0.as_hex().to_string();
+		if let Ok(rgb_info) = self.rgb_kv_store.read_rgb_channel_info(&channel_id_str, false) {
 			rgb_info.remote_rgb_amount
 		} else {
 			0
@@ -5142,7 +5140,7 @@ where
 				&holder_keys.revocation_key,
 			);
 			if self.is_colored() && !self.is_trusted_no_broadcast() {
-				color_htlc(&mut htlc_tx, htlc, &self.ldk_data_dir)
+				color_htlc(&mut htlc_tx, htlc, &self.ldk_data_dir, self.rgb_kv_store.as_ref())
 					.expect("successful htlc coloring");
 			}
 
@@ -7395,6 +7393,7 @@ where
 				&self.context.channel_id,
 				&mut closing_transaction,
 				&self.context.ldk_data_dir,
+				self.context.rgb_kv_store.as_ref(),
 			)
 			.expect("successful closing TX coloring");
 		}
@@ -8994,7 +8993,7 @@ where
 				&self.context.channel_id,
 				rgb_offered_htlc,
 				rgb_received_htlc,
-				&self.context.ldk_data_dir,
+				self.context.rgb_kv_store.as_ref(),
 			);
 		}
 
@@ -11809,7 +11808,7 @@ where
 		let were_node_one = node_id.as_slice() < counterparty_node_id.as_slice();
 
 		let contract_id = if self.context.is_colored() {
-			let (rgb_info, _) = get_rgb_channel_info_pending(&self.context.channel_id, &self.context.ldk_data_dir);
+			let rgb_info = get_rgb_channel_info_pending(&self.context.channel_id, self.context.rgb_kv_store.as_ref());
 			Some(rgb_info.contract_id)
 		} else {
 			None
@@ -12963,7 +12962,7 @@ where
 			}
 		}
 		if self.context.is_colored() && rgb_received_htlc > 0 {
-			update_rgb_channel_amount_pending(&self.context.channel_id, 0, rgb_received_htlc, &self.context.ldk_data_dir);
+			update_rgb_channel_amount_pending(&self.context.channel_id, 0, rgb_received_htlc, self.context.rgb_kv_store.as_ref());
 		}
 		if let Some((feerate, update_state)) = self.context.pending_update_fee {
 			if update_state == FeeUpdateState::AwaitingRemoteRevokeToAnnounce {
@@ -13630,6 +13629,7 @@ where
 		fee_estimator: &LowerBoundedFeeEstimator<F>, entropy_source: &ES, signer_provider: &SP, counterparty_node_id: PublicKey, their_features: &InitFeatures,
 		channel_value_satoshis: u64, push_msat: u64, user_id: u128, config: &UserConfig, current_chain_height: u32,
 		outbound_scid_alias: u64, temporary_channel_id: Option<ChannelId>, logger: L, consignment_endpoint: Option<RgbTransport>, ldk_data_dir: PathBuf, push_asset_amount: Option<u64>,
+		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<OutboundV1Channel<SP>, APIError>
 	where ES::Target: EntropySource,
 	      F::Target: FeeEstimator,
@@ -13672,6 +13672,7 @@ where
 			consignment_endpoint,
 			ldk_data_dir,
 			push_asset_amount,
+			rgb_kv_store,
 		)?;
 		let unfunded_context = UnfundedChannelContext {
 			unfunded_channel_age_ticks: 0,
@@ -13755,7 +13756,7 @@ where
 		let temporary_channel_id = self.context.channel_id;
 		self.context.channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
 		if self.context.is_colored() {
-			rename_rgb_files(&self.context.channel_id, &temporary_channel_id, &self.context.ldk_data_dir);
+			rename_rgb_files(&self.context.channel_id, &temporary_channel_id, self.context.rgb_kv_store.as_ref());
 		}
 
 		// If the funding transaction is a coinbase transaction, we need to set the minimum depth to 100.
@@ -14009,7 +14010,8 @@ where
 		fee_estimator: &LowerBoundedFeeEstimator<F>, entropy_source: &ES, signer_provider: &SP,
 		counterparty_node_id: PublicKey, our_supported_features: &ChannelTypeFeatures,
 		their_features: &InitFeatures, msg: &msgs::OpenChannel, user_id: u128, config: &UserConfig,
-		current_chain_height: u32, logger: &L, is_0conf: bool, ldk_data_dir: PathBuf
+		current_chain_height: u32, logger: &L, is_0conf: bool, ldk_data_dir: PathBuf,
+		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<InboundV1Channel<SP>, ChannelError>
 		where ES::Target: EntropySource,
 			  F::Target: FeeEstimator,
@@ -14051,6 +14053,7 @@ where
 			msg.common_fields.clone(),
 			msg.push_asset_amount,
 			ldk_data_dir,
+			rgb_kv_store,
 		)?;
 		let unfunded_context = UnfundedChannelContext {
 			unfunded_channel_age_ticks: 0,
@@ -14251,7 +14254,7 @@ where
 		counterparty_node_id: PublicKey, their_features: &InitFeatures, funding_satoshis: u64,
 		funding_inputs: Vec<FundingTxInput>, user_id: u128, config: &UserConfig,
 		current_chain_height: u32, outbound_scid_alias: u64, funding_confirmation_target: ConfirmationTarget,
-		logger: L, ldk_data_dir: PathBuf,
+		logger: L, ldk_data_dir: PathBuf, rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<Self, APIError>
 	where ES::Target: EntropySource,
 	      F::Target: FeeEstimator,
@@ -14295,6 +14298,7 @@ where
 			None,
 			ldk_data_dir,
 			None,
+			rgb_kv_store,
 		)?;
 		let unfunded_context = UnfundedChannelContext {
 			unfunded_channel_age_ticks: 0,
@@ -14405,7 +14409,7 @@ where
 		holder_node_id: PublicKey, counterparty_node_id: PublicKey, our_supported_features: &ChannelTypeFeatures,
 		their_features: &InitFeatures, msg: &msgs::OpenChannelV2,
 		user_id: u128, config: &UserConfig, current_chain_height: u32, logger: &L,
-		ldk_data_dir: PathBuf,
+		ldk_data_dir: PathBuf, rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<Self, ChannelError>
 		where ES::Target: EntropySource,
 			  F::Target: FeeEstimator,
@@ -14452,6 +14456,7 @@ where
 			msg.common_fields.clone(),
 			None,
 			ldk_data_dir,
+			rgb_kv_store,
 		)?;
 		let channel_id = ChannelId::v2_from_revocation_basepoints(
 			&funding.get_holder_pubkeys().revocation_basepoint,
@@ -15144,16 +15149,16 @@ where
 	}
 }
 
-impl<'a, 'b, 'c, ES: Deref, SP: Deref>
-	ReadableArgs<(&'a ES, &'b SP, &'c ChannelTypeFeatures, PathBuf)> for FundedChannel<SP>
+impl<'a, 'b, 'c, ES: Deref, SP: Deref> ReadableArgs<(&'a ES, &'b SP, &'c ChannelTypeFeatures, PathBuf, Arc<dyn KVStoreSync + Send + Sync>)>
+	for FundedChannel<SP>
 where
 	ES::Target: EntropySource,
 	SP::Target: SignerProvider,
 {
 	fn read<R: io::Read>(
-		reader: &mut R, args: (&'a ES, &'b SP, &'c ChannelTypeFeatures, PathBuf),
+		reader: &mut R, args: (&'a ES, &'b SP, &'c ChannelTypeFeatures, PathBuf, Arc<dyn KVStoreSync + Send + Sync>),
 	) -> Result<Self, DecodeError> {
-		let (entropy_source, signer_provider, our_supported_features, ldk_data_dir) = args;
+		let (entropy_source, signer_provider, our_supported_features, ldk_data_dir, rgb_kv_store) = args;
 		let ver = read_ver_prefix!(reader, SERIALIZATION_VERSION);
 		if ver <= 2 {
 			return Err(DecodeError::UnknownVersion);
@@ -15955,6 +15960,7 @@ where
 				interactive_tx_signing_session,
 				is_colored: consignment_endpoint.is_some(),
 				ldk_data_dir,
+				rgb_kv_store,
 			},
 			holder_commitment_point,
 			pending_splice,

@@ -11,6 +11,7 @@ use crate::ln::types::ChannelId;
 use crate::sign::SignerProvider;
 use crate::types::features::ChannelTypeFeatures;
 use crate::types::payment::PaymentHash;
+use crate::util::persist::KVStoreSync;
 
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::hex::DisplayHex;
@@ -29,13 +30,14 @@ use rgb_lib::{
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 
+use crate::io;
 use core::ops::Deref;
 use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 
-/// Static blinding costant (will be removed in the future)
+/// Static blinding constant (will be removed in the future)
 pub const STATIC_BLINDING: u64 = 777;
 /// Name of the file containing the bitcoin network
 pub const BITCOIN_NETWORK_FNAME: &str = "bitcoin_network";
@@ -49,9 +51,24 @@ pub const WALLET_ACCOUNT_XPUB_VANILLA_FNAME: &str = "wallet_account_xpub_vanilla
 pub const WALLET_ACCOUNT_XPUB_COLORED_FNAME: &str = "wallet_account_xpub_colored";
 /// Name of the file containing the master fingerprint of the wallet
 pub const WALLET_MASTER_FINGERPRINT_FNAME: &str = "wallet_master_fingerprint";
-const INBOUND_EXT: &str = "inbound";
-const OUTBOUND_EXT: &str = "outbound";
-const VIRTUAL_CHANNEL_MARKER_PREFIX: &str = "virtual_channel_";
+
+// kv_store namespace constants for RGB data persistence
+/// Primary namespace for all RGB data
+pub const RGB_PRIMARY_NS: &str = "rgb";
+/// Secondary namespace for channel info
+pub const RGB_CHANNEL_INFO_NS: &str = "channel_info";
+/// Secondary namespace for pending channel info
+pub const RGB_CHANNEL_INFO_PENDING_NS: &str = "channel_info_pending";
+/// Secondary namespace for inbound payment info
+pub const RGB_PAYMENT_INFO_INBOUND_NS: &str = "payment_info_inbound";
+/// Secondary namespace for outbound payment info
+pub const RGB_PAYMENT_INFO_OUTBOUND_NS: &str = "payment_info_outbound";
+/// Secondary namespace for transfer info
+pub const RGB_TRANSFER_INFO_NS: &str = "transfer_info";
+/// Secondary namespace for consignment data
+pub const RGB_CONSIGNMENT_NS: &str = "consignment";
+/// Secondary namespace for wallet configuration
+pub const RGB_WALLET_CONFIG_NS: &str = "wallet_config";
 
 /// RGB channel info
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -116,38 +133,32 @@ mod contract_id_serde {
 	}
 }
 
-fn _get_file_in_parent(ldk_data_dir: &Path, fname: &str) -> PathBuf {
-	ldk_data_dir.parent().unwrap().join(fname)
-}
-
-fn _read_file_in_parent(ldk_data_dir: &Path, fname: &str) -> String {
-	fs::read_to_string(_get_file_in_parent(ldk_data_dir, fname)).unwrap()
-}
-
-fn _get_rgb_wallet_dir(ldk_data_dir: &Path) -> PathBuf {
-	let fingerprint = _read_file_in_parent(ldk_data_dir, WALLET_FINGERPRINT_FNAME);
-	_get_file_in_parent(ldk_data_dir, &fingerprint)
-}
-
-fn _get_bitcoin_network(ldk_data_dir: &Path) -> BitcoinNetwork {
-	let bitcoin_network = _read_file_in_parent(ldk_data_dir, BITCOIN_NETWORK_FNAME);
+fn _get_bitcoin_network(kv_store: &dyn KVStoreSync) -> BitcoinNetwork {
+	let bitcoin_network =
+		kv_store.read_config(BITCOIN_NETWORK_FNAME).expect("bitcoin_network must be in KVStore");
 	BitcoinNetwork::from_str(&bitcoin_network).unwrap()
 }
 
-fn _get_account_xpub_colored(ldk_data_dir: &Path) -> String {
-	_read_file_in_parent(ldk_data_dir, WALLET_ACCOUNT_XPUB_COLORED_FNAME)
+fn _get_account_xpub_colored(kv_store: &dyn KVStoreSync) -> String {
+	kv_store
+		.read_config(WALLET_ACCOUNT_XPUB_COLORED_FNAME)
+		.expect("account_xpub_colored must be in KVStore")
 }
 
-fn _get_account_xpub_vanilla(ldk_data_dir: &Path) -> String {
-	_read_file_in_parent(ldk_data_dir, WALLET_ACCOUNT_XPUB_VANILLA_FNAME)
+fn _get_account_xpub_vanilla(kv_store: &dyn KVStoreSync) -> String {
+	kv_store
+		.read_config(WALLET_ACCOUNT_XPUB_VANILLA_FNAME)
+		.expect("account_xpub_vanilla must be in KVStore")
 }
 
-fn _get_master_fingerprint(ldk_data_dir: &Path) -> String {
-	_read_file_in_parent(ldk_data_dir, WALLET_MASTER_FINGERPRINT_FNAME)
+fn _get_master_fingerprint(kv_store: &dyn KVStoreSync) -> String {
+	kv_store
+		.read_config(WALLET_MASTER_FINGERPRINT_FNAME)
+		.expect("master_fingerprint must be in KVStore")
 }
 
-fn _get_indexer_url(ldk_data_dir: &Path) -> String {
-	_read_file_in_parent(ldk_data_dir, INDEXER_URL_FNAME)
+fn _get_indexer_url(kv_store: &dyn KVStoreSync) -> String {
+	kv_store.read_config(INDEXER_URL_FNAME).expect("indexer_url must be in KVStore")
 }
 
 fn _new_rgb_wallet(
@@ -179,18 +190,20 @@ fn _new_rgb_wallet(
 	.expect("valid rgb-lib wallet")
 }
 
-fn _get_wallet_data(ldk_data_dir: &Path) -> (String, BitcoinNetwork, String, String, String) {
+fn _get_wallet_data(
+	ldk_data_dir: &Path, kv_store: &dyn KVStoreSync,
+) -> (String, BitcoinNetwork, String, String, String) {
 	let data_dir = ldk_data_dir.parent().unwrap().to_string_lossy().to_string();
-	let bitcoin_network = _get_bitcoin_network(ldk_data_dir);
-	let account_xpub_vanilla = _get_account_xpub_vanilla(ldk_data_dir);
-	let account_xpub_colored = _get_account_xpub_colored(ldk_data_dir);
-	let master_fingerprint = _get_master_fingerprint(ldk_data_dir);
+	let bitcoin_network = _get_bitcoin_network(kv_store);
+	let account_xpub_vanilla = _get_account_xpub_vanilla(kv_store);
+	let account_xpub_colored = _get_account_xpub_colored(kv_store);
+	let master_fingerprint = _get_master_fingerprint(kv_store);
 	(data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint)
 }
 
-async fn _get_rgb_wallet(ldk_data_dir: &Path) -> Wallet {
+async fn _get_rgb_wallet(ldk_data_dir: &Path, kv_store: &dyn KVStoreSync) -> Wallet {
 	let (data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint) =
-		_get_wallet_data(ldk_data_dir);
+		_get_wallet_data(ldk_data_dir, kv_store);
 	tokio::task::spawn_blocking(move || {
 		_new_rgb_wallet(
 			data_dir,
@@ -206,11 +219,12 @@ async fn _get_rgb_wallet(ldk_data_dir: &Path) -> Wallet {
 
 async fn _accept_transfer(
 	ldk_data_dir: &Path, funding_txid: String, consignment_endpoint: RgbTransport,
+	kv_store: &dyn KVStoreSync,
 ) -> Result<(RgbTransfer, Vec<Assignment>), RgbLibError> {
 	let funding_vout = 1;
 	let (data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint) =
-		_get_wallet_data(ldk_data_dir);
-	let indexer_url = _get_indexer_url(ldk_data_dir);
+		_get_wallet_data(ldk_data_dir, kv_store);
+	let indexer_url = _get_indexer_url(kv_store);
 	tokio::task::spawn_blocking(move || {
 		let mut wallet = _new_rgb_wallet(
 			data_dir,
@@ -229,18 +243,6 @@ async fn _accept_transfer(
 	})
 	.await
 	.unwrap()
-}
-
-/// Read TransferInfo file
-pub fn read_rgb_transfer_info(path: &Path) -> TransferInfo {
-	let serialized_info = fs::read_to_string(path).expect("able to read transfer info file");
-	serde_json::from_str(&serialized_info).expect("valid transfer info")
-}
-
-/// Write TransferInfo file
-pub fn write_rgb_transfer_info(path: &PathBuf, info: &TransferInfo) {
-	let serialized_info = serde_json::to_string(&info).expect("valid transfer info");
-	fs::write(path, serialized_info).expect("able to write transfer info file")
 }
 
 fn _counterparty_output_index(
@@ -275,12 +277,14 @@ where
 {
 	let channel_id = &channel_context.channel_id;
 	let ldk_data_dir = channel_context.ldk_data_dir.as_path();
+	let kv_store = channel_context.rgb_kv_store.as_ref();
 
 	let commitment_tx = commitment_transaction.clone().built.transaction;
 
-	let (rgb_info, _) = get_rgb_channel_info_pending(channel_id, ldk_data_dir);
+	let rgb_info = get_rgb_channel_info_pending(channel_id, kv_store);
 	let contract_id = rgb_info.contract_id;
 
+	let chan_id = channel_id.0.as_hex();
 	let mut rgb_offered_htlc = 0;
 	let mut rgb_received_htlc = 0;
 	let mut last_rgb_payment_info = None;
@@ -297,68 +301,34 @@ where
 		let inbound = htlc.offered == counterparty;
 
 		let htlc_payment_hash = htlc.payment_hash.0.as_hex().to_string();
-		let mut rgb_payment_info_path = ldk_data_dir.join(htlc_payment_hash);
-		if inbound {
-			rgb_payment_info_path.set_extension(INBOUND_EXT);
+		let htlc_proxy_id = format!("{chan_id}{htlc_payment_hash}");
+		let htlc_proxy_id_pending = format!("{htlc_proxy_id}_pending");
+		let pending_key = format!("{htlc_payment_hash}_pending");
+		let namespace =
+			if inbound { RGB_PAYMENT_INFO_INBOUND_NS } else { RGB_PAYMENT_INFO_OUTBOUND_NS };
+
+		if let Ok(data) = kv_store.read(RGB_PRIMARY_NS, namespace, &pending_key) {
+			let mut rgb_payment_info: RgbPaymentInfo =
+				bincode::deserialize(&data).expect("valid data");
+			rgb_payment_info.local_rgb_amount = rgb_info.local_rgb_amount;
+			rgb_payment_info.remote_rgb_amount = rgb_info.remote_rgb_amount;
+			let data = bincode::serialize(&rgb_payment_info).expect("valid rgb payment info");
+			kv_store
+				.write(RGB_PRIMARY_NS, namespace, &htlc_proxy_id, data.clone())
+				.expect("able to write rgb payment info");
+			kv_store
+				.write(RGB_PRIMARY_NS, namespace, &htlc_proxy_id_pending, data)
+				.expect("able to write rgb pending payment info");
+			kv_store
+				.remove(RGB_PRIMARY_NS, namespace, &pending_key, false)
+				.expect("able to remove pending payment info");
+		}
+
+		let rgb_payment_info = if let Ok(data) =
+			kv_store.read(RGB_PRIMARY_NS, namespace, &htlc_proxy_id)
+		{
+			bincode::deserialize(&data).expect("valid data")
 		} else {
-			rgb_payment_info_path.set_extension(OUTBOUND_EXT);
-		}
-		let rgb_payment_info_tmp_path =
-			get_rgb_payment_info_pending_path(&htlc.payment_hash, ldk_data_dir, inbound);
-		let channel_rgb_payment_info_path = get_rgb_channel_payment_info_path(
-			channel_id,
-			&htlc.payment_hash,
-			ldk_data_dir,
-			inbound,
-			false,
-		);
-		let channel_pending_rgb_payment_info_path = get_rgb_channel_payment_info_path(
-			channel_id,
-			&htlc.payment_hash,
-			ldk_data_dir,
-			inbound,
-			true,
-		);
-		let is_compatible_rgb_payment_info = |rgb_payment_info: &RgbPaymentInfo| {
-			rgb_payment_info.contract_id == contract_id
-				&& rgb_payment_info.amount == htlc_amount_rgb
-				&& rgb_payment_info.inbound == inbound
-		};
-
-		let mut rgb_payment_info = None;
-		let mut should_persist_channel_info = false;
-		let mut used_raw_rgb_payment_info_tmp = false;
-
-		if channel_rgb_payment_info_path.exists() {
-			let candidate = parse_rgb_payment_info(&channel_rgb_payment_info_path);
-			if is_compatible_rgb_payment_info(&candidate) {
-				rgb_payment_info = Some(candidate);
-			}
-		}
-		if rgb_payment_info.is_none() && channel_pending_rgb_payment_info_path.exists() {
-			let candidate = parse_rgb_payment_info(&channel_pending_rgb_payment_info_path);
-			if is_compatible_rgb_payment_info(&candidate) {
-				rgb_payment_info = Some(candidate);
-				should_persist_channel_info = true;
-			}
-		}
-		if rgb_payment_info.is_none() && rgb_payment_info_tmp_path.exists() {
-			let candidate = parse_rgb_payment_info(&rgb_payment_info_tmp_path);
-			if is_compatible_rgb_payment_info(&candidate) {
-				rgb_payment_info = Some(candidate);
-				should_persist_channel_info = true;
-				used_raw_rgb_payment_info_tmp = true;
-			}
-		}
-		if rgb_payment_info.is_none() && rgb_payment_info_path.exists() {
-			let candidate = parse_rgb_payment_info(&rgb_payment_info_path);
-			if is_compatible_rgb_payment_info(&candidate) {
-				rgb_payment_info = Some(candidate);
-				should_persist_channel_info = true;
-			}
-		}
-		let mut rgb_payment_info = rgb_payment_info.unwrap_or_else(|| {
-			should_persist_channel_info = true;
 			let rgb_payment_info = RgbPaymentInfo {
 				contract_id,
 				amount: htlc_amount_rgb,
@@ -367,31 +337,27 @@ where
 				swap_payment: true,
 				inbound,
 			};
-			let serialized_info =
-				serde_json::to_string(&rgb_payment_info).expect("valid rgb payment info");
-			fs::write(&rgb_payment_info_path, serialized_info)
-				.expect("able to write rgb payment info file");
+			let data = bincode::serialize(&rgb_payment_info).expect("valid rgb payment info");
+			kv_store
+				.write(RGB_PRIMARY_NS, namespace, &htlc_proxy_id, data.clone())
+				.expect("able to write rgb payment info");
+			kv_store
+				.write(RGB_PRIMARY_NS, namespace, &htlc_proxy_id_pending, data.clone())
+				.expect("able to write rgb pending payment info");
+			kv_store
+				.write(RGB_PRIMARY_NS, namespace, &htlc_payment_hash, data)
+				.expect("able to write rgb payment info");
 			rgb_payment_info
-		});
-		if should_persist_channel_info {
-			rgb_payment_info.local_rgb_amount = rgb_info.local_rgb_amount;
-			rgb_payment_info.remote_rgb_amount = rgb_info.remote_rgb_amount;
-			let serialized_info =
-				serde_json::to_string(&rgb_payment_info).expect("valid rgb payment info");
-			fs::write(&channel_rgb_payment_info_path, serialized_info.clone())
-				.expect("able to write rgb payment info file");
-			fs::write(&channel_pending_rgb_payment_info_path, serialized_info)
-				.expect("able to write rgb payment info file");
-			if used_raw_rgb_payment_info_tmp && rgb_payment_info_tmp_path.exists() {
-				fs::remove_file(&rgb_payment_info_tmp_path).expect("able to remove file");
-			}
-		}
+		};
 
-		if !channel_pending_rgb_payment_info_path.exists() {
-			let serialized_info =
-				serde_json::to_string(&rgb_payment_info).expect("valid rgb payment info");
-			fs::write(&channel_pending_rgb_payment_info_path, serialized_info)
-				.expect("able to write rgb payment info file");
+		if kv_store
+			.read(RGB_PRIMARY_NS, namespace, &htlc_proxy_id_pending)
+			.is_err()
+		{
+			let data = bincode::serialize(&rgb_payment_info).expect("valid rgb payment info");
+			kv_store
+				.write(RGB_PRIMARY_NS, namespace, &htlc_proxy_id_pending, data)
+				.expect("able to write rgb pending payment info");
 		}
 
 		if inbound {
@@ -449,7 +415,7 @@ where
 	let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
 	let handle = Handle::current();
 	let _ = handle.enter();
-	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir));
+	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
 	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
 	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
 	let modified_tx = match psbt.extract_tx() {
@@ -463,15 +429,13 @@ where
 
 	wallet.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored)).unwrap();
 
-	// save RGB transfer data to disk
 	let rgb_amount = if counterparty {
 		vout_p2wpkh_amt + rgb_offered_htlc
 	} else {
 		vout_p2wsh_amt + rgb_received_htlc
 	};
 	let transfer_info = TransferInfo { contract_id, rgb_amount };
-	let transfer_info_path = ldk_data_dir.join(format!("{txid}_transfer_info"));
-	write_rgb_transfer_info(&transfer_info_path, &transfer_info);
+	kv_store.write_rgb_transfer_info(&txid.to_string(), &transfer_info);
 
 	Ok(())
 }
@@ -479,6 +443,7 @@ where
 /// Color HTLC transaction
 pub(crate) fn color_htlc(
 	htlc_tx: &mut Transaction, htlc: &HTLCOutputInCommitment, ldk_data_dir: &Path,
+	kv_store: &dyn KVStoreSync,
 ) -> Result<(), ChannelError> {
 	if htlc.rgb_payment.is_none_or(|(_, a)| a == 0) {
 		return Ok(());
@@ -488,8 +453,7 @@ pub(crate) fn color_htlc(
 	let consignment_htlc_outpoint = htlc_tx.input.first().unwrap().previous_output;
 	let commitment_txid = consignment_htlc_outpoint.txid.to_string();
 
-	let transfer_info_path = ldk_data_dir.join(format!("{commitment_txid}_transfer_info"));
-	let transfer_info = read_rgb_transfer_info(&transfer_info_path);
+	let transfer_info = kv_store.read_rgb_transfer_info(&commitment_txid);
 	let contract_id = transfer_info.contract_id;
 
 	let asset_coloring_info = AssetColoringInfo {
@@ -505,7 +469,7 @@ pub(crate) fn color_htlc(
 	let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
 	let handle = Handle::current();
 	let _ = handle.enter();
-	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir));
+	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
 	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
 	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
 	let modified_tx = match psbt.extract_tx() {
@@ -517,10 +481,8 @@ pub(crate) fn color_htlc(
 
 	wallet.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored)).unwrap();
 
-	// save RGB transfer data to disk
 	let transfer_info = TransferInfo { contract_id, rgb_amount: htlc_amount_rgb };
-	let transfer_info_path = ldk_data_dir.join(format!("{txid}_transfer_info"));
-	write_rgb_transfer_info(&transfer_info_path, &transfer_info);
+	kv_store.write_rgb_transfer_info(&txid.to_string(), &transfer_info);
 
 	Ok(())
 }
@@ -528,10 +490,11 @@ pub(crate) fn color_htlc(
 /// Color closing transaction
 pub(crate) fn color_closing(
 	channel_id: &ChannelId, closing_transaction: &mut ClosingTransaction, ldk_data_dir: &Path,
+	kv_store: &dyn KVStoreSync,
 ) -> Result<(), ChannelError> {
 	let closing_tx = closing_transaction.clone().built;
 
-	let (rgb_info, _) = get_rgb_channel_info_pending(channel_id, ldk_data_dir);
+	let rgb_info = get_rgb_channel_info_pending(channel_id, kv_store);
 	let contract_id = rgb_info.contract_id;
 
 	let holder_vout_amount = rgb_info.local_rgb_amount;
@@ -568,7 +531,7 @@ pub(crate) fn color_closing(
 	let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
 	let handle = Handle::current();
 	let _ = handle.enter();
-	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir));
+	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
 	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
 	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
 	let modified_tx = match psbt.extract_tx() {
@@ -582,113 +545,35 @@ pub(crate) fn color_closing(
 
 	wallet.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored)).unwrap();
 
-	// save RGB transfer data to disk
 	let transfer_info = TransferInfo { contract_id, rgb_amount: holder_vout_amount };
-	let transfer_info_path = ldk_data_dir.join(format!("{txid}_transfer_info"));
-	write_rgb_transfer_info(&transfer_info_path, &transfer_info);
+	kv_store.write_rgb_transfer_info(&txid.to_string(), &transfer_info);
 
 	Ok(())
 }
 
-/// Get RgbPaymentInfo file path
-pub fn get_rgb_payment_info_path(
-	payment_hash: &PaymentHash, ldk_data_dir: &Path, inbound: bool,
-) -> PathBuf {
-	let mut path = ldk_data_dir.join(payment_hash.0.as_hex().to_string());
-	path.set_extension(if inbound { INBOUND_EXT } else { OUTBOUND_EXT });
-	path
-}
-
-/// Get pending RgbPaymentInfo file path scoped only to the payment hash.
-pub fn get_rgb_payment_info_pending_path(
-	payment_hash: &PaymentHash, ldk_data_dir: &Path, inbound: bool,
-) -> PathBuf {
-	_append_pending_extension(&get_rgb_payment_info_path(payment_hash, ldk_data_dir, inbound))
-}
-
-/// Get channel-scoped RgbPaymentInfo file path for a payment attached to a concrete channel.
-pub fn get_rgb_channel_payment_info_path(
-	channel_id: &ChannelId, payment_hash: &PaymentHash, ldk_data_dir: &Path, inbound: bool,
-	pending: bool,
-) -> PathBuf {
-	let mut path =
-		ldk_data_dir.join(format!("{}{}", channel_id.0.as_hex(), payment_hash.0.as_hex()));
-	path.set_extension(if inbound { INBOUND_EXT } else { OUTBOUND_EXT });
-	if pending {
-		_append_pending_extension(&path)
-	} else {
-		path
-	}
-}
-
-/// Parse RgbPaymentInfo
-pub fn parse_rgb_payment_info(rgb_payment_info_path: &PathBuf) -> RgbPaymentInfo {
-	let serialized_info =
-		fs::read_to_string(rgb_payment_info_path).expect("valid rgb payment info");
-	serde_json::from_str(&serialized_info).expect("valid rgb info file")
-}
-
-/// Get RgbInfo file path
-pub fn get_rgb_channel_info_path(channel_id: &str, ldk_data_dir: &Path, pending: bool) -> PathBuf {
-	let mut info_file_path = ldk_data_dir.join(channel_id);
-	if pending {
-		info_file_path.set_extension("pending");
-	}
-	info_file_path
-}
-
-/// Get RgbInfo file
+/// Get RgbInfo from KVStore
 pub(crate) fn get_rgb_channel_info(
-	channel_id: &str, ldk_data_dir: &Path, pending: bool,
-) -> (RgbInfo, PathBuf) {
-	let info_file_path = get_rgb_channel_info_path(channel_id, ldk_data_dir, pending);
-	let info = parse_rgb_channel_info(&info_file_path);
-	(info, info_file_path)
+	channel_id: &str, pending: bool, kv_store: &dyn KVStoreSync,
+) -> RgbInfo {
+	kv_store.read_rgb_channel_info(channel_id, pending).expect("channel info must exist in KVStore")
 }
 
-/// Get pending RgbInfo file
-pub fn get_rgb_channel_info_pending(
-	channel_id: &ChannelId, ldk_data_dir: &Path,
-) -> (RgbInfo, PathBuf) {
-	get_rgb_channel_info(&channel_id.0.as_hex().to_string(), ldk_data_dir, true)
+/// Get pending RgbInfo from KVStore
+pub fn get_rgb_channel_info_pending(channel_id: &ChannelId, kv_store: &dyn KVStoreSync) -> RgbInfo {
+	get_rgb_channel_info(&channel_id.0.as_hex().to_string(), true, kv_store)
 }
 
-/// Get marker file path used to identify trusted virtual channels for routing policy.
-pub fn get_virtual_channel_marker_path(channel_id: &str, ldk_data_dir: &Path) -> PathBuf {
-	ldk_data_dir.join(format!("{VIRTUAL_CHANNEL_MARKER_PREFIX}{channel_id}"))
+/// Whether the channel has RGB data in KVStore
+pub fn is_channel_rgb(channel_id: &ChannelId, kv_store: &dyn KVStoreSync) -> bool {
+	let channel_id_str = channel_id.0.as_hex().to_string();
+	kv_store.read_rgb_channel_info(&channel_id_str, false).is_ok()
 }
 
-/// Parse RgbInfo
-pub fn parse_rgb_channel_info(rgb_channel_info_path: &PathBuf) -> RgbInfo {
-	let serialized_info = fs::read_to_string(rgb_channel_info_path).expect("valid rgb info file");
-	serde_json::from_str(&serialized_info).expect("valid rgb info file")
-}
-
-/// Whether the channel data for a channel exist
-pub fn is_channel_rgb(channel_id: &ChannelId, ldk_data_dir: &Path) -> bool {
-	get_rgb_channel_info_path(&channel_id.0.as_hex().to_string(), ldk_data_dir, false).exists()
-}
-
-/// Write RgbInfo file
-pub fn write_rgb_channel_info(path: &PathBuf, rgb_info: &RgbInfo) {
-	let serialized_info = serde_json::to_string(&rgb_info).expect("valid rgb info");
-	fs::write(path, serialized_info).expect("able to write")
-}
-
-fn _append_pending_extension(path: &Path) -> PathBuf {
-	let mut new_path = path.to_path_buf();
-	new_path.set_extension(format!("{}_pending", new_path.extension().unwrap().to_string_lossy()));
-	new_path
-}
-
-/// Write RGB payment info to file
+/// Write RGB payment info to database
 pub fn write_rgb_payment_info_file(
-	ldk_data_dir: &Path, payment_hash: &PaymentHash, contract_id: ContractId, amount_rgb: u64,
-	swap_payment: bool, inbound: bool,
+	payment_hash: &PaymentHash, contract_id: ContractId, amount_rgb: u64, swap_payment: bool,
+	inbound: bool, kv_store: &Arc<dyn KVStoreSync + Send + Sync>,
 ) {
-	let rgb_payment_info_path = get_rgb_payment_info_path(payment_hash, ldk_data_dir, inbound);
-	let rgb_payment_info_tmp_path =
-		get_rgb_payment_info_pending_path(payment_hash, ldk_data_dir, inbound);
 	let rgb_payment_info = RgbPaymentInfo {
 		contract_id,
 		amount: amount_rgb,
@@ -697,42 +582,42 @@ pub fn write_rgb_payment_info_file(
 		swap_payment,
 		inbound,
 	};
-	let serialized_info = serde_json::to_string(&rgb_payment_info).expect("valid rgb payment info");
-	std::fs::write(rgb_payment_info_path, serialized_info.clone())
-		.expect("able to write rgb payment info file");
-	std::fs::write(rgb_payment_info_tmp_path, serialized_info)
-		.expect("able to write rgb payment info tmp file");
+	kv_store.write_rgb_payment_info(payment_hash, &rgb_payment_info);
+	let payment_hash_hex = payment_hash.0.as_hex();
+	let pending_key = format!("{payment_hash_hex}_pending");
+	let namespace =
+		if inbound { RGB_PAYMENT_INFO_INBOUND_NS } else { RGB_PAYMENT_INFO_OUTBOUND_NS };
+	let data = bincode::serialize(&rgb_payment_info).expect("valid rgb payment info");
+	kv_store
+		.write(RGB_PRIMARY_NS, namespace, &pending_key, data)
+		.expect("able to write rgb payment info pending");
 }
 
-/// Rename RGB files from temporary to final channel ID
+/// Rename RGB channel info from temporary to final channel ID in KVStore
 pub(crate) fn rename_rgb_files(
-	channel_id: &ChannelId, temporary_channel_id: &ChannelId, ldk_data_dir: &Path,
+	channel_id: &ChannelId, temporary_channel_id: &ChannelId, kv_store: &dyn KVStoreSync,
 ) {
 	let temp_chan_id = temporary_channel_id.0.as_hex().to_string();
 	let chan_id = channel_id.0.as_hex().to_string();
 
-	fs::rename(
-		get_rgb_channel_info_path(&temp_chan_id, ldk_data_dir, false),
-		get_rgb_channel_info_path(&chan_id, ldk_data_dir, false),
-	)
-	.expect("rename ok");
-	fs::rename(
-		get_rgb_channel_info_path(&temp_chan_id, ldk_data_dir, true),
-		get_rgb_channel_info_path(&chan_id, ldk_data_dir, true),
-	)
-	.expect("rename ok");
+	let rgb_info = kv_store.read_rgb_channel_info(&temp_chan_id, false).expect("rename ok");
+	kv_store.write_rgb_channel_info(&chan_id, &rgb_info, false);
+	kv_store.remove_rgb_channel_info(&temp_chan_id, false).expect("rename ok");
 
-	let funding_consignment_tmp = ldk_data_dir.join(format!("consignment_{}", temp_chan_id));
-	if funding_consignment_tmp.exists() {
-		let funding_consignment = ldk_data_dir.join(format!("consignment_{}", chan_id));
-		fs::rename(funding_consignment_tmp, funding_consignment).expect("rename ok");
+	let rgb_info = kv_store.read_rgb_channel_info(&temp_chan_id, true).expect("rename ok");
+	kv_store.write_rgb_channel_info(&chan_id, &rgb_info, true);
+	kv_store.remove_rgb_channel_info(&temp_chan_id, true).expect("rename ok");
+
+	if let Ok(consignment_data) = kv_store.read_rgb_consignment(&temp_chan_id) {
+		kv_store.write_rgb_consignment(&chan_id, consignment_data);
+		kv_store.remove_rgb_consignment(&temp_chan_id);
 	}
 }
 
 /// Handle funding on the receiver side
 pub(crate) fn handle_funding(
 	temporary_channel_id: &ChannelId, funding_txid: String, ldk_data_dir: &Path,
-	consignment_endpoint: RgbTransport, push_asset_amount: Option<u64>,
+	consignment_endpoint: RgbTransport, push_asset_amount: Option<u64>, kv_store: &dyn KVStoreSync,
 ) -> Result<(), MsgHandleErrInternal> {
 	let handle = Handle::current();
 	let _ = handle.enter();
@@ -740,6 +625,7 @@ pub(crate) fn handle_funding(
 		ldk_data_dir,
 		funding_txid.clone(),
 		consignment_endpoint,
+		kv_store,
 	));
 	let (consignment, remote_rgb_assignments) = match accept_res {
 		Ok(res) => res,
@@ -775,11 +661,11 @@ pub(crate) fn handle_funding(
 		},
 	};
 
-	let consignment_path = ldk_data_dir.join(format!("consignment_{}", funding_txid));
-	consignment.save_file(consignment_path).expect("unable to write file");
-	let consignment_path =
-		ldk_data_dir.join(format!("consignment_{}", temporary_channel_id.0.as_hex()));
-	consignment.save_file(consignment_path).expect("unable to write file");
+	let mut consignment_buf = Vec::new();
+	consignment.save(&mut consignment_buf).expect("unable to serialize consignment");
+	kv_store.write_rgb_consignment(&funding_txid, consignment_buf.clone());
+	let temp_chan_id = temporary_channel_id.0.as_hex().to_string();
+	kv_store.write_rgb_consignment(&temp_chan_id, consignment_buf);
 
 	if remote_rgb_assignments.len() != 1 {
 		return Err(MsgHandleErrInternal::send_err_msg_no_close(
@@ -800,24 +686,19 @@ pub(crate) fn handle_funding(
 		remote_rgb_amount: channel_rgb_amount - push_amount,
 	};
 	let temporary_channel_id_str = temporary_channel_id.0.as_hex().to_string();
-	write_rgb_channel_info(
-		&get_rgb_channel_info_path(&temporary_channel_id_str, ldk_data_dir, true),
-		&rgb_info,
-	);
-	write_rgb_channel_info(
-		&get_rgb_channel_info_path(&temporary_channel_id_str, ldk_data_dir, false),
-		&rgb_info,
-	);
+
+	kv_store.write_rgb_channel_info(&temporary_channel_id_str, &rgb_info, true);
+	kv_store.write_rgb_channel_info(&temporary_channel_id_str, &rgb_info, false);
 
 	Ok(())
 }
 
-/// Update RGB channel amount
+/// Update RGB channel amount in KVStore
 pub fn update_rgb_channel_amount(
-	channel_id: &str, rgb_offered_htlc: u64, rgb_received_htlc: u64, ldk_data_dir: &Path,
-	pending: bool,
+	channel_id: &str, rgb_offered_htlc: u64, rgb_received_htlc: u64, pending: bool,
+	kv_store: &dyn KVStoreSync,
 ) {
-	let (mut rgb_info, info_file_path) = get_rgb_channel_info(channel_id, ldk_data_dir, pending);
+	let mut rgb_info = get_rgb_channel_info(channel_id, pending, kv_store);
 
 	if rgb_offered_htlc > rgb_received_htlc {
 		let spent = rgb_offered_htlc - rgb_received_htlc;
@@ -829,57 +710,153 @@ pub fn update_rgb_channel_amount(
 		rgb_info.remote_rgb_amount -= received;
 	}
 
-	write_rgb_channel_info(&info_file_path, &rgb_info)
+	kv_store.write_rgb_channel_info(channel_id, &rgb_info, pending);
 }
 
 /// Update pending RGB channel amount
 pub(crate) fn update_rgb_channel_amount_pending(
-	channel_id: &ChannelId, rgb_offered_htlc: u64, rgb_received_htlc: u64, ldk_data_dir: &Path,
+	channel_id: &ChannelId, rgb_offered_htlc: u64, rgb_received_htlc: u64,
+	kv_store: &dyn KVStoreSync,
 ) {
 	update_rgb_channel_amount(
 		&channel_id.0.as_hex().to_string(),
 		rgb_offered_htlc,
 		rgb_received_htlc,
-		ldk_data_dir,
 		true,
+		kv_store,
 	)
 }
 
-/// Whether the payment is colored
-pub(crate) fn is_payment_rgb(ldk_data_dir: &Path, payment_hash: &PaymentHash) -> bool {
-	get_rgb_payment_info_path(payment_hash, ldk_data_dir, false).exists()
-		|| get_rgb_payment_info_path(payment_hash, ldk_data_dir, true).exists()
+/// extension trait for RGB-specific KVStore operations
+pub trait RgbKvStoreExt {
+	/// read transfer info from KVStore
+	fn read_rgb_transfer_info(&self, txid: &str) -> TransferInfo;
+	/// write transfer info to KVStore
+	fn write_rgb_transfer_info(&self, txid: &str, info: &TransferInfo);
+	/// read channel info from KVStore
+	fn read_rgb_channel_info(&self, channel_id: &str, pending: bool) -> Result<RgbInfo, io::Error>;
+	/// write channel info to KVStore
+	fn write_rgb_channel_info(&self, channel_id: &str, rgb_info: &RgbInfo, pending: bool);
+	/// read payment info from KVStore
+	fn read_rgb_payment_info(
+		&self, payment_hash: &PaymentHash, inbound: bool,
+	) -> Result<RgbPaymentInfo, io::Error>;
+	/// write payment info to KVStore
+	fn write_rgb_payment_info(&self, payment_hash: &PaymentHash, info: &RgbPaymentInfo);
+	/// read consignment from KVStore
+	fn read_rgb_consignment(&self, id: &str) -> Result<Vec<u8>, io::Error>;
+	/// write consignment to KVStore
+	fn write_rgb_consignment(&self, id: &str, data: Vec<u8>);
+	/// remove channel info from KVStore
+	fn remove_rgb_channel_info(&self, channel_id: &str, pending: bool) -> Result<(), io::Error>;
+	/// remove consignment from KVStore
+	fn remove_rgb_consignment(&self, id: &str);
+	/// read a wallet config value from KVStore
+	fn read_config(&self, key: &str) -> Result<String, io::Error>;
+	/// write a wallet config value to KVStore
+	fn write_config(&self, key: &str, value: &str);
+	/// whether the payment is colored
+	fn is_payment_rgb(&self, payment_hash: &PaymentHash) -> bool;
+	/// filter first hops to only include channels with sufficient RGB assets
+	fn filter_first_hops(
+		&self, payment_hash: &PaymentHash, first_hops: &mut Vec<ChannelDetails>,
+	);
 }
 
-/// Detect the contract ID of the payment and then filter hops based on contract ID and amount
-pub(crate) fn filter_first_hops(
-	ldk_data_dir: &Path, payment_hash: &PaymentHash, first_hops: &mut Vec<ChannelDetails>,
-) -> (ContractId, u64) {
-	let rgb_payment_info_path = get_rgb_payment_info_path(payment_hash, ldk_data_dir, false);
-	let rgb_payment_info = parse_rgb_payment_info(&rgb_payment_info_path);
-	let contract_id = rgb_payment_info.contract_id;
-	let rgb_amount = rgb_payment_info.amount;
-	first_hops.retain(|h| {
-		let info_file_path = ldk_data_dir.join(h.channel_id.0.as_hex().to_string());
-		if !info_file_path.exists() {
-			return false;
-		}
-		let serialized_info = fs::read_to_string(info_file_path).expect("valid rgb info file");
-		let rgb_info: RgbInfo =
-			serde_json::from_str(&serialized_info).expect("valid rgb info file");
-		rgb_info.contract_id == contract_id && rgb_info.local_rgb_amount >= rgb_amount
-	});
-	let has_virtual_rgb_hop = first_hops.iter().any(|h| {
-		let marker =
-			get_virtual_channel_marker_path(&h.channel_id.0.as_hex().to_string(), ldk_data_dir);
-		marker.exists()
-	});
-	if has_virtual_rgb_hop {
+impl<K: KVStoreSync + ?Sized> RgbKvStoreExt for K {
+	fn read_rgb_transfer_info(&self, txid: &str) -> TransferInfo {
+		let data = self.read(RGB_PRIMARY_NS, RGB_TRANSFER_INFO_NS, txid)
+			.expect("KVStore read failed");
+		bincode::deserialize(&data).expect("valid transfer info")
+	}
+
+	fn write_rgb_transfer_info(&self, txid: &str, info: &TransferInfo) {
+		let data = bincode::serialize(info).expect("valid transfer info");
+		self.write(RGB_PRIMARY_NS, RGB_TRANSFER_INFO_NS, txid, data)
+			.expect("KVStore write failed");
+	}
+
+	fn read_rgb_channel_info(&self, channel_id: &str, pending: bool) -> Result<RgbInfo, io::Error> {
+		let namespace = if pending { RGB_CHANNEL_INFO_PENDING_NS } else { RGB_CHANNEL_INFO_NS };
+		let data = self.read(RGB_PRIMARY_NS, namespace, channel_id)?;
+		bincode::deserialize(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+	}
+
+	fn write_rgb_channel_info(&self, channel_id: &str, rgb_info: &RgbInfo, pending: bool) {
+		let namespace = if pending { RGB_CHANNEL_INFO_PENDING_NS } else { RGB_CHANNEL_INFO_NS };
+		let data = bincode::serialize(rgb_info).expect("valid rgb channel info");
+		self.write(RGB_PRIMARY_NS, namespace, channel_id, data)
+			.expect("KVStore write failed");
+	}
+
+	fn read_rgb_payment_info(
+		&self, payment_hash: &PaymentHash, inbound: bool,
+	) -> Result<RgbPaymentInfo, io::Error> {
+		let namespace =
+			if inbound { RGB_PAYMENT_INFO_INBOUND_NS } else { RGB_PAYMENT_INFO_OUTBOUND_NS };
+		let key = payment_hash.0.as_hex().to_string();
+		let data = self.read(RGB_PRIMARY_NS, namespace, &key)?;
+		bincode::deserialize(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+	}
+
+	fn write_rgb_payment_info(&self, payment_hash: &PaymentHash, info: &RgbPaymentInfo) {
+		let namespace =
+			if info.inbound { RGB_PAYMENT_INFO_INBOUND_NS } else { RGB_PAYMENT_INFO_OUTBOUND_NS };
+		let key = payment_hash.0.as_hex().to_string();
+		let data = bincode::serialize(info).expect("valid rgb payment info");
+		self.write(RGB_PRIMARY_NS, namespace, &key, data)
+			.expect("KVStore write failed");
+	}
+
+	fn read_rgb_consignment(&self, id: &str) -> Result<Vec<u8>, io::Error> {
+		self.read(RGB_PRIMARY_NS, RGB_CONSIGNMENT_NS, id)
+	}
+
+	fn write_rgb_consignment(&self, id: &str, data: Vec<u8>) {
+		self.write(RGB_PRIMARY_NS, RGB_CONSIGNMENT_NS, id, data)
+			.expect("KVStore write failed");
+	}
+
+	fn remove_rgb_channel_info(&self, channel_id: &str, pending: bool) -> Result<(), io::Error> {
+		let namespace = if pending { RGB_CHANNEL_INFO_PENDING_NS } else { RGB_CHANNEL_INFO_NS };
+		self.remove(RGB_PRIMARY_NS, namespace, channel_id, false)
+	}
+
+	fn remove_rgb_consignment(&self, id: &str) {
+		self.remove(RGB_PRIMARY_NS, RGB_CONSIGNMENT_NS, id, false)
+			.expect("KVStore remove failed");
+	}
+
+	fn read_config(&self, key: &str) -> Result<String, io::Error> {
+		let data = self.read(RGB_PRIMARY_NS, RGB_WALLET_CONFIG_NS, key)?;
+		String::from_utf8(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+	}
+
+	fn write_config(&self, key: &str, value: &str) {
+		self.write(RGB_PRIMARY_NS, RGB_WALLET_CONFIG_NS, key, value.as_bytes().to_vec())
+			.expect("KVStore write failed");
+	}
+
+	fn is_payment_rgb(&self, payment_hash: &PaymentHash) -> bool {
+		self.read_rgb_payment_info(payment_hash, false).is_ok()
+			|| self.read_rgb_payment_info(payment_hash, true).is_ok()
+	}
+
+	fn filter_first_hops(&self, payment_hash: &PaymentHash, first_hops: &mut Vec<ChannelDetails>) {
+		let rgb_payment_info = match self.read_rgb_payment_info(payment_hash, false) {
+			Ok(info) => info,
+			Err(_) => return,
+		};
+		let contract_id = rgb_payment_info.contract_id;
+		let rgb_amount = rgb_payment_info.amount;
 		first_hops.retain(|h| {
-			let marker =
-				get_virtual_channel_marker_path(&h.channel_id.0.as_hex().to_string(), ldk_data_dir);
-			marker.exists()
+			let channel_id_str = h.channel_id.0.as_hex().to_string();
+			match self.read_rgb_channel_info(&channel_id_str, false) {
+				Ok(rgb_info) => {
+					rgb_info.contract_id == contract_id && rgb_info.local_rgb_amount >= rgb_amount
+				},
+				Err(_) => false,
+			}
 		});
 	}
-	(contract_id, rgb_amount)
 }

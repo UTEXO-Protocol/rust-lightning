@@ -26,9 +26,7 @@ use crate::offers::invoice::{Bolt12Invoice, DerivedSigningPubkey, InvoiceBuilder
 use crate::offers::invoice_request::InvoiceRequest;
 use crate::offers::nonce::Nonce;
 use crate::offers::static_invoice::StaticInvoice;
-use crate::rgb_utils::{
-	filter_first_hops, get_rgb_payment_info_path, is_payment_rgb, parse_rgb_payment_info,
-};
+use crate::rgb_utils::RgbKvStoreExt;
 use crate::routing::router::{
 	BlindedTail, InFlightHtlcs, Path, PaymentParameters, Route, RouteParameters,
 	RouteParametersConfig, Router,
@@ -47,10 +45,9 @@ use core::ops::Deref;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 
-use std::path::PathBuf;
-
 use crate::prelude::*;
-use crate::sync::Mutex;
+use crate::sync::{Arc, Mutex};
+use crate::util::persist::KVStoreSync;
 
 /// The number of ticks of [`ChannelManager::timer_tick_occurred`] until we time-out the idempotency
 /// of payments by [`PaymentId`]. See [`OutboundPayments::remove_stale_payments`].
@@ -846,13 +843,13 @@ pub(super) struct OutboundPayments {
 	pub(super) pending_outbound_payments: Mutex<HashMap<PaymentId, PendingOutboundPayment>>,
 	awaiting_invoice: AtomicBool,
 	retry_lock: Mutex<()>,
-	ldk_data_dir: PathBuf,
+	rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 }
 
 impl OutboundPayments {
 	pub(super) fn new(
 		pending_outbound_payments: HashMap<PaymentId, PendingOutboundPayment>,
-		ldk_data_dir: PathBuf,
+		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Self {
 		let has_invoice_requests = pending_outbound_payments.values().any(|payment| {
 			matches!(
@@ -867,7 +864,7 @@ impl OutboundPayments {
 			pending_outbound_payments: Mutex::new(pending_outbound_payments),
 			awaiting_invoice: AtomicBool::new(has_invoice_requests),
 			retry_lock: Mutex::new(()),
-			ldk_data_dir,
+			rgb_kv_store,
 		}
 	}
 }
@@ -1050,9 +1047,14 @@ impl OutboundPayments {
 		}
 
 		let mut filtered_first_hops = first_hops.into_iter().collect::<Vec<_>>();
-		let rgb_payment = is_payment_rgb(&self.ldk_data_dir, &payment_hash).then(|| {
-			filter_first_hops(&self.ldk_data_dir, &payment_hash, &mut filtered_first_hops)
-		});
+		let rgb_payment = if self.rgb_kv_store.is_payment_rgb(&payment_hash) {
+			self.rgb_kv_store.filter_first_hops(&payment_hash, &mut filtered_first_hops);
+			let info = self.rgb_kv_store.read_rgb_payment_info(&payment_hash, false)
+				.expect("payment info must exist");
+			Some((info.contract_id, info.amount))
+		} else {
+			None
+		};
 		let mut route_params = RouteParameters::from_payment_params_and_value(
 			PaymentParameters::from_bolt12_invoice(&invoice)
 				.with_user_config_ignoring_fee_limit(params_config), invoice.amount_msats(),
@@ -1411,14 +1413,11 @@ impl OutboundPayments {
 						..
 					} = pmt
 					{
-						let rgb_payment_info_path =
-							get_rgb_payment_info_path(payment_hash, &self.ldk_data_dir, false);
-						let rgb_payment = if rgb_payment_info_path.exists() {
-							let rgb_payment_info = parse_rgb_payment_info(&rgb_payment_info_path);
-							Some((rgb_payment_info.contract_id, rgb_payment_info.amount))
-						} else {
-							None
-						};
+						let rgb_payment =
+							match self.rgb_kv_store.read_rgb_payment_info(payment_hash, false) {
+								Ok(info) => Some((info.contract_id, info.amount)),
+								Err(_) => None,
+							};
 						if pending_amt_msat < total_msat {
 							retry_id_route_params = Some((
 								*payment_hash,
@@ -1570,9 +1569,9 @@ impl OutboundPayments {
 		SP: Fn(SendAlongPathArgs) -> Result<(), APIError>,
 	{
 		let mut filtered_first_hops = first_hops.into_iter().collect::<Vec<_>>();
-		is_payment_rgb(&self.ldk_data_dir, &payment_hash).then(|| {
-			filter_first_hops(&self.ldk_data_dir, &payment_hash, &mut filtered_first_hops)
-		});
+		if self.rgb_kv_store.is_payment_rgb(&payment_hash) {
+			self.rgb_kv_store.filter_first_hops(&payment_hash, &mut filtered_first_hops);
+		}
 		let route = self.find_initial_route(
 			payment_id, payment_hash, &recipient_onion, keysend_preimage, None, &mut route_params, router,
 			&filtered_first_hops, &inflight_htlcs, node_signer, best_block_height, logger,
@@ -1627,9 +1626,9 @@ impl OutboundPayments {
 		}
 
 		let mut filtered_first_hops = first_hops.into_iter().collect::<Vec<_>>();
-		is_payment_rgb(&self.ldk_data_dir, &payment_hash).then(|| {
-			filter_first_hops(&self.ldk_data_dir, &payment_hash, &mut filtered_first_hops)
-		});
+		if self.rgb_kv_store.is_payment_rgb(&payment_hash) {
+			self.rgb_kv_store.filter_first_hops(&payment_hash, &mut filtered_first_hops);
+		}
 
 		let mut route = match router.find_route_with_id(
 			&node_signer.get_node_id(Recipient::Node).unwrap(), &route_params,

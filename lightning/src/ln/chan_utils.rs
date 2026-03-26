@@ -36,6 +36,7 @@ use crate::ln::msgs::DecodeError;
 use crate::rgb_utils::{color_htlc, is_tx_colored};
 use crate::sign::EntropySource;
 use crate::types::payment::{PaymentHash, PaymentPreimage};
+use crate::util::persist::KVStoreSync;
 use crate::util::ser::{Readable, ReadableArgs, RequiredWrapper, Writeable, Writer};
 use crate::util::transaction_utils;
 
@@ -2156,6 +2157,7 @@ impl<'a> TrustedCommitmentTransaction<'a> {
 	pub fn get_htlc_sigs<T: secp256k1::Signing, ES: Deref>(
 		&self, htlc_base_key: &SecretKey, channel_parameters: &DirectedChannelTransactionParameters,
 		entropy_source: &ES, secp_ctx: &Secp256k1<T>, ldk_data_dir: &PathBuf,
+		rgb_kv_store: &dyn KVStoreSync,
 	) -> Result<Vec<Signature>, ()> where ES::Target: EntropySource {
 		let inner = self.inner;
 		let keys = &inner.keys;
@@ -2167,7 +2169,7 @@ impl<'a> TrustedCommitmentTransaction<'a> {
 			assert!(this_htlc.transaction_output_index.is_some());
 			let mut htlc_tx = build_htlc_transaction(&txid, inner.feerate_per_kw, channel_parameters.contest_delay(), &this_htlc, &self.channel_type_features, &keys.broadcaster_delayed_payment_key, &keys.revocation_key);
 			if inner.is_colored() {
-				if let Err(_e) = color_htlc(&mut htlc_tx, this_htlc, ldk_data_dir) {
+				if let Err(_e) = color_htlc(&mut htlc_tx, this_htlc, ldk_data_dir, rgb_kv_store) {
 					return Err(());
 				}
 			}
