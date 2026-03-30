@@ -4521,8 +4521,8 @@ where
 
 	/// Abandons a trusted no-broadcast, virtual channel whose funding has not been observed on-chain.
 	///
-	/// This is intended for channels created via the trusted no-broadcast manual funding path and
-	/// will fail unless:
+	/// RLN is responsible for enforcing the no-client-value predicate before calling this API.
+	/// This method only ensures the structural cleanup gates below and will fail unless:
 	///  * `dangerous_ack` is `true`,
 	///  * the channel is flagged `trusted_no_broadcast`,
 	///  * the funding transaction is still unconfirmed and has never been observed on-chain, and
