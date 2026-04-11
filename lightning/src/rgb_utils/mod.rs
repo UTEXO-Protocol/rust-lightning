@@ -50,6 +50,8 @@ pub const WALLET_ACCOUNT_XPUB_VANILLA_FNAME: &str = "wallet_account_xpub_vanilla
 pub const WALLET_ACCOUNT_XPUB_COLORED_FNAME: &str = "wallet_account_xpub_colored";
 /// Name of the file containing the master fingerprint of the wallet
 pub const WALLET_MASTER_FINGERPRINT_FNAME: &str = "wallet_master_fingerprint";
+/// Name of the file containing the wallet reuse_addresses setting
+pub const WALLET_REUSE_ADDRESSES_FNAME: &str = "wallet_reuse_addresses";
 
 // kv_store namespace constants for RGB data persistence
 /// Primary namespace for all RGB data
@@ -160,9 +162,16 @@ fn _get_indexer_url(kv_store: &dyn KVStoreSync) -> String {
 	kv_store.read_config(INDEXER_URL_FNAME).expect("indexer_url must be in KVStore")
 }
 
+fn _get_reuse_addresses(kv_store: &dyn KVStoreSync) -> bool {
+	kv_store
+		.read_config(WALLET_REUSE_ADDRESSES_FNAME)
+		.map(|v| v == "true")
+		.unwrap_or(false)
+}
+
 fn _new_rgb_wallet(
 	data_dir: String, bitcoin_network: BitcoinNetwork, account_xpub_vanilla: String,
-	account_xpub_colored: String, master_fingerprint: String,
+	account_xpub_colored: String, master_fingerprint: String, reuse_addresses: bool,
 ) -> Wallet {
 	let keys = SinglesigKeys {
 		account_xpub_vanilla,
@@ -183,6 +192,7 @@ fn _new_rgb_wallet(
 				AssetSchema::Uda,
 				AssetSchema::Ifa,
 			],
+			reuse_addresses,
 		},
 		keys,
 	)
@@ -191,17 +201,18 @@ fn _new_rgb_wallet(
 
 fn _get_wallet_data(
 	ldk_data_dir: &Path, kv_store: &dyn KVStoreSync,
-) -> (String, BitcoinNetwork, String, String, String) {
+) -> (String, BitcoinNetwork, String, String, String, bool) {
 	let data_dir = ldk_data_dir.parent().unwrap().to_string_lossy().to_string();
 	let bitcoin_network = _get_bitcoin_network(kv_store);
 	let account_xpub_vanilla = _get_account_xpub_vanilla(kv_store);
 	let account_xpub_colored = _get_account_xpub_colored(kv_store);
 	let master_fingerprint = _get_master_fingerprint(kv_store);
-	(data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint)
+	let reuse_addresses = _get_reuse_addresses(kv_store);
+	(data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint, reuse_addresses)
 }
 
 async fn _get_rgb_wallet(ldk_data_dir: &Path, kv_store: &dyn KVStoreSync) -> Wallet {
-	let (data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint) =
+	let (data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint, reuse_addresses) =
 		_get_wallet_data(ldk_data_dir, kv_store);
 	tokio::task::spawn_blocking(move || {
 		_new_rgb_wallet(
@@ -210,6 +221,7 @@ async fn _get_rgb_wallet(ldk_data_dir: &Path, kv_store: &dyn KVStoreSync) -> Wal
 			account_xpub_vanilla,
 			account_xpub_colored,
 			master_fingerprint,
+			reuse_addresses,
 		)
 	})
 	.await
@@ -221,7 +233,7 @@ async fn _accept_transfer(
 	kv_store: &dyn KVStoreSync,
 ) -> Result<(RgbTransfer, Vec<Assignment>), RgbLibError> {
 	let funding_vout = 1;
-	let (data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint) =
+	let (data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint, reuse_addresses) =
 		_get_wallet_data(ldk_data_dir, kv_store);
 	let indexer_url = _get_indexer_url(kv_store);
 	tokio::task::spawn_blocking(move || {
@@ -231,6 +243,7 @@ async fn _accept_transfer(
 			account_xpub_vanilla,
 			account_xpub_colored,
 			master_fingerprint,
+			reuse_addresses,
 		);
 		wallet.go_online(true, indexer_url)?;
 		wallet.accept_transfer(
