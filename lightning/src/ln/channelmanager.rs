@@ -952,14 +952,14 @@ impl Into<LocalHTLCFailureReason> for FailureCode {
 /// immediately (ie with no further calls on it made). Thus, this step happens inside a
 /// peer_state lock. We then return the set of things that need to be done outside the lock in
 /// this struct and call handle_error!() on it.
-pub(crate) struct MsgHandleErrInternal {
+struct MsgHandleErrInternal {
 	err: msgs::LightningError,
 	closes_channel: bool,
 	shutdown_finish: Option<(ShutdownResult, Option<msgs::ChannelUpdate>)>,
 	tx_abort: Option<msgs::TxAbort>,
 }
 impl MsgHandleErrInternal {
-	pub(crate) fn send_err_msg_no_close(err: String, channel_id: ChannelId) -> Self {
+	fn send_err_msg_no_close(err: String, channel_id: ChannelId) -> Self {
 		Self {
 			err: LightningError {
 				err: err.clone(),
@@ -10612,7 +10612,16 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				Some(Ok(inbound_chan)) => {
 					let logger = WithChannelContext::from(&self.logger, &inbound_chan.context, None);
 					if let Some(consignment_endpoint) = &inbound_chan.funding.consignment_endpoint {
-						handle_funding(&msg.temporary_channel_id, msg.funding_txid.to_string(), &self.ldk_data_dir, consignment_endpoint.clone(), inbound_chan.funding.push_asset_amount, self.rgb_kv_store.as_ref())?;
+						match handle_funding(&msg.temporary_channel_id, msg.funding_txid.to_string(), &self.ldk_data_dir, consignment_endpoint.clone(), inbound_chan.funding.push_asset_amount, self.rgb_kv_store.as_ref()) {
+							Ok(()) => (),
+							Err(e) => {
+								// at this point the channel initiator already transitioned its channel to the funded channel ID
+								let mut chan = Channel::from(inbound_chan);
+								let funding_txo = OutPoint { txid: msg.funding_txid, index: msg.funding_output_index };
+								chan.context_mut().channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
+								return Err(convert_channel_err!(self, peer_state, e, &mut chan).1);
+							},
+						}
 					}
 					match inbound_chan.funding_created(msg, best_block, &self.signer_provider, &&logger) {
 						Ok(res) => res,

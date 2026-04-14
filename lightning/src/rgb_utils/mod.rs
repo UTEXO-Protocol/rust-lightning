@@ -6,7 +6,6 @@ use crate::ln::chan_utils::{
 };
 use crate::ln::channel::{ChannelContext, ChannelError, FundingScope};
 use crate::ln::channel_state::ChannelDetails;
-use crate::ln::channelmanager::MsgHandleErrInternal;
 use crate::ln::types::ChannelId;
 use crate::sign::SignerProvider;
 use crate::types::features::ChannelTypeFeatures;
@@ -233,7 +232,7 @@ async fn _accept_transfer(
 			account_xpub_colored,
 			master_fingerprint,
 		);
-		wallet.go_online(true, indexer_url).unwrap();
+		wallet.go_online(true, indexer_url)?;
 		wallet.accept_transfer(
 			funding_txid.clone(),
 			funding_vout,
@@ -618,7 +617,7 @@ pub(crate) fn rename_rgb_files(
 pub(crate) fn handle_funding(
 	temporary_channel_id: &ChannelId, funding_txid: String, ldk_data_dir: &Path,
 	consignment_endpoint: RgbTransport, push_asset_amount: Option<u64>, kv_store: &dyn KVStoreSync,
-) -> Result<(), MsgHandleErrInternal> {
+) -> Result<(), ChannelError> {
 	let handle = Handle::current();
 	let _ = handle.enter();
 	let accept_res = futures::executor::block_on(_accept_transfer(
@@ -630,35 +629,23 @@ pub(crate) fn handle_funding(
 	let (consignment, remote_rgb_assignments) = match accept_res {
 		Ok(res) => res,
 		Err(RgbLibError::InvalidConsignment) => {
-			return Err(MsgHandleErrInternal::send_err_msg_no_close(
-				"Invalid RGB consignment for funding".to_owned(),
-				*temporary_channel_id,
-			))
+			return Err(ChannelError::close("Invalid RGB consignment for funding".to_owned()))
 		},
 		Err(RgbLibError::NoConsignment) => {
-			return Err(MsgHandleErrInternal::send_err_msg_no_close(
-				"Failed to find RGB consignment".to_owned(),
-				*temporary_channel_id,
-			))
+			return Err(ChannelError::close("Failed to find RGB consignment".to_owned()))
 		},
 		Err(RgbLibError::UnknownRgbSchema { schema_id }) => {
-			return Err(MsgHandleErrInternal::send_err_msg_no_close(
-				format!("Unknown RGB schema: {schema_id}"),
-				*temporary_channel_id,
-			))
+			return Err(ChannelError::close(format!("Unknown RGB schema: {schema_id}")))
 		},
 		Err(RgbLibError::UnsupportedSchema { asset_schema }) => {
-			return Err(MsgHandleErrInternal::send_err_msg_no_close(
-				format!("Unsupported RGB schema: {asset_schema}"),
-				*temporary_channel_id,
-			))
+			return Err(ChannelError::close(format!("Unsupported RGB schema: {asset_schema}")))
 		},
-		Err(e) => {
-			return Err(MsgHandleErrInternal::send_err_msg_no_close(
-				format!("Unexpected error: {e}"),
-				*temporary_channel_id,
-			))
+		Err(RgbLibError::Indexer { details })
+		| Err(RgbLibError::InvalidIndexer { details })
+		| Err(RgbLibError::Network { details }) => {
+			return Err(ChannelError::close(format!("Failed to connect to indexer: {details}")))
 		},
+		Err(e) => return Err(ChannelError::close(format!("Unexpected error: {e}"))),
 	};
 
 	let mut consignment_buf = Vec::new();
@@ -668,10 +655,10 @@ pub(crate) fn handle_funding(
 	kv_store.write_rgb_consignment(&temp_chan_id, consignment_buf);
 
 	if remote_rgb_assignments.len() != 1 {
-		return Err(MsgHandleErrInternal::send_err_msg_no_close(
-			format!("Unexpected number of RGB assignments: {}", remote_rgb_assignments.len()),
-			*temporary_channel_id,
-		));
+		return Err(ChannelError::close(format!(
+			"Unexpected number of RGB assignments: {}",
+			remote_rgb_assignments.len()
+		)));
 	}
 	let channel_rgb_amount = match remote_rgb_assignments[0] {
 		Assignment::Fungible(amt) => amt,

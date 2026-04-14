@@ -968,7 +968,7 @@ impl fmt::Display for ChannelError {
 }
 
 impl ChannelError {
-	pub(super) fn close(err: String) -> Self {
+	pub(crate) fn close(err: String) -> Self {
 		ChannelError::Close((err.clone(), ClosureReason::ProcessingError { err }))
 	}
 }
