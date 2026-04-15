@@ -2014,6 +2014,8 @@ where
 /// #     best_block: lightning::chain::BestBlock,
 /// #     current_timestamp: u32,
 /// #     mut reader: R,
+/// #     ldk_data_dir: std::path::PathBuf,
+/// #     rgb_kv_store: std::sync::Arc<dyn lightning::util::persist::KVStoreSync + Send + Sync>,
 /// # ) -> Result<(), lightning::ln::msgs::DecodeError> {
 /// // Fresh start with no channels
 /// let params = ChainParameters {
@@ -2024,6 +2026,7 @@ where
 /// let channel_manager = ChannelManager::new(
 ///     fee_estimator, chain_monitor, tx_broadcaster, router, message_router, logger,
 ///     entropy_source, node_signer, signer_provider, config.clone(), params, current_timestamp,
+///     ldk_data_dir, rgb_kv_store,
 /// );
 ///
 /// // Restart from deserialized data
@@ -2031,6 +2034,7 @@ where
 /// let args = ChannelManagerReadArgs::new(
 ///     entropy_source, node_signer, signer_provider, fee_estimator, chain_monitor, tx_broadcaster,
 ///     router, message_router, logger, config, channel_monitors.iter().collect(),
+///     ldk_data_dir, rgb_kv_store,
 /// );
 /// let (block_hash, channel_manager) =
 ///     <(BlockHash, ChannelManager<_, _, _, _, _, _, _, _, _>)>::read(&mut reader, args)?;
@@ -20029,22 +20033,24 @@ pub mod bench {
 		config.channel_handshake_config.minimum_depth = 1;
 
 		let seed_a = [1u8; 32];
-		let keys_manager_a = KeysManager::new(&seed_a, 42, 42, true);
+		let rgb_kv_store_a: Arc<dyn crate::util::persist::KVStoreSync + Send + Sync> = Arc::new(test_utils::TestStore::new(false));
+		let keys_manager_a = KeysManager::new(&seed_a, 42, 42, true, std::path::PathBuf::from("/tmp/ldk_bench_a"), rgb_kv_store_a.clone());
 		let chain_monitor_a = ChainMonitor::new(None, &tx_broadcaster, &logger_a, &fee_estimator, &persister_a, &keys_manager_a, keys_manager_a.get_peer_storage_key());
 		let node_a = ChannelManager::new(&fee_estimator, &chain_monitor_a, &tx_broadcaster, &router, &message_router, &logger_a, &keys_manager_a, &keys_manager_a, &keys_manager_a, config.clone(), ChainParameters {
 			network,
 			best_block: BestBlock::from_network(network),
-		}, genesis_block.header.time);
+		}, genesis_block.header.time, std::path::PathBuf::from("/tmp/ldk_bench_a"), rgb_kv_store_a);
 		let node_a_holder = ANodeHolder { node: &node_a };
 
 		let logger_b = test_utils::TestLogger::with_id("node a".to_owned());
 		let seed_b = [2u8; 32];
-		let keys_manager_b = KeysManager::new(&seed_b, 42, 42, true);
+		let rgb_kv_store_b: Arc<dyn crate::util::persist::KVStoreSync + Send + Sync> = Arc::new(test_utils::TestStore::new(false));
+		let keys_manager_b = KeysManager::new(&seed_b, 42, 42, true, std::path::PathBuf::from("/tmp/ldk_bench_b"), rgb_kv_store_b.clone());
 		let chain_monitor_b = ChainMonitor::new(None, &tx_broadcaster, &logger_a, &fee_estimator, &persister_b, &keys_manager_b, keys_manager_b.get_peer_storage_key());
 		let node_b = ChannelManager::new(&fee_estimator, &chain_monitor_b, &tx_broadcaster, &router, &message_router, &logger_b, &keys_manager_b, &keys_manager_b, &keys_manager_b, config.clone(), ChainParameters {
 			network,
 			best_block: BestBlock::from_network(network),
-		}, genesis_block.header.time);
+		}, genesis_block.header.time, std::path::PathBuf::from("/tmp/ldk_bench_b"), rgb_kv_store_b);
 		let node_b_holder = ANodeHolder { node: &node_b };
 
 		node_a.peer_connected(node_b.get_our_node_id(), &Init {

@@ -16,9 +16,12 @@ use lightning::routing::router::DefaultRouter;
 use lightning::sign::KeysManager;
 use lightning::sign::NodeSigner;
 use lightning::util::config::UserConfig;
+use lightning::util::persist::KVStoreSync;
 use lightning::util::test_utils::{
 	TestBroadcaster, TestChainSource, TestFeeEstimator, TestLogger, TestScorer, TestStore,
 };
+
+use std::path::PathBuf;
 
 use lightning_liquidity::lsps0::ser::LSPS_MESSAGE_TYPE_ID;
 use lightning_liquidity::LiquidityManagerSync;
@@ -39,7 +42,8 @@ pub fn do_test(data: &[u8]) {
 	let scorer = Arc::new(LockingWrapper::new(TestScorer::new()));
 	let now = Duration::from_secs(genesis_block.header.time as u64);
 	let seed = sha256::Hash::hash(b"lsps-message-seed").to_byte_array();
-	let keys_manager = Arc::new(KeysManager::new(&seed, now.as_secs(), now.subsec_nanos(), true));
+	let rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync> = Arc::new(TestStore::new(false));
+	let keys_manager = Arc::new(KeysManager::new(&seed, now.as_secs(), now.subsec_nanos(), true, PathBuf::from("/tmp/ldk_test"), Arc::clone(&rgb_kv_store)));
 	let router = Arc::new(DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
@@ -75,6 +79,8 @@ pub fn do_test(data: &[u8]) {
 		UserConfig::default(),
 		params,
 		genesis_block.header.time,
+		PathBuf::from("/tmp/ldk_test"),
+		Arc::clone(&rgb_kv_store),
 	));
 
 	let liquidity_manager = Arc::new(LiquidityManagerSync::new(

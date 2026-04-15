@@ -2326,8 +2326,12 @@ mod tests {
 			let scorer = Arc::new(LockingWrapper::new(TestScorer::new()));
 			let now = Duration::from_secs(genesis_block.header.time as u64);
 			let seed = [i as u8; 32];
-			let keys_manager =
-				Arc::new(KeysManager::new(&seed, now.as_secs(), now.subsec_nanos(), true));
+			let rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync> =
+				Arc::new(test_utils::TestStore::new(false));
+			let keys_manager = Arc::new(KeysManager::new(
+				&seed, now.as_secs(), now.subsec_nanos(), true,
+				PathBuf::from("/tmp/ldk_test"), Arc::clone(&rgb_kv_store),
+			));
 			let router = Arc::new(DefaultRouter::new(
 				Arc::clone(&network_graph),
 				Arc::clone(&logger),
@@ -2343,8 +2347,10 @@ mod tests {
 			let kv_store =
 				Arc::new(Persister::new(format!("{}_persister_{}", &persist_dir, i).into()));
 			let now = Duration::from_secs(genesis_block.header.time as u64);
-			let keys_manager =
-				Arc::new(KeysManager::new(&seed, now.as_secs(), now.subsec_nanos(), true));
+			let keys_manager = Arc::new(KeysManager::new(
+				&seed, now.as_secs(), now.subsec_nanos(), true,
+				PathBuf::from("/tmp/ldk_test"), Arc::clone(&rgb_kv_store),
+			));
 			let chain_monitor = Arc::new(chainmonitor::ChainMonitor::new(
 				Some(Arc::clone(&chain_source)),
 				Arc::clone(&tx_broadcaster),
@@ -2369,6 +2375,8 @@ mod tests {
 				UserConfig::default(),
 				params,
 				genesis_block.header.time,
+				PathBuf::from("/tmp/ldk_test"),
+				Arc::clone(&rgb_kv_store),
 			));
 			let messenger = Arc::new(OnionMessenger::new(
 				Arc::clone(&keys_manager),

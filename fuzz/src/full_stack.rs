@@ -66,12 +66,16 @@ use lightning::util::errors::APIError;
 use lightning::util::hash_tables::*;
 use lightning::util::logger::Logger;
 use lightning::util::ser::{Readable, Writeable};
+use lightning::util::persist::KVStoreSync;
 use lightning::util::test_channel_signer::{EnforcementState, TestChannelSigner};
+use lightning::util::test_utils::TestStore;
 
 use lightning_invoice::RawBolt11Invoice;
 
 use crate::utils::test_logger;
 use crate::utils::test_persister::TestPersister;
+
+use std::path::PathBuf;
 
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
@@ -597,6 +601,7 @@ pub fn do_test(mut data: &[u8], logger: &Arc<dyn Logger>) {
 	let network = Network::Bitcoin;
 	let best_block_timestamp = genesis_block(network).header.time;
 	let params = ChainParameters { network, best_block: BestBlock::from_network(network) };
+	let rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync> = Arc::new(TestStore::new(false));
 	let channelmanager = Arc::new(ChannelManager::new(
 		fee_est.clone(),
 		monitor.clone(),
@@ -610,6 +615,8 @@ pub fn do_test(mut data: &[u8], logger: &Arc<dyn Logger>) {
 		config,
 		params,
 		best_block_timestamp,
+		PathBuf::from("/tmp/ldk_test"),
+		Arc::clone(&rgb_kv_store),
 	));
 	// Adding new calls to `EntropySource::get_secure_random_bytes` during startup can change all the
 	// keys subsequently generated in this test. Rather than regenerating all the messages manually,

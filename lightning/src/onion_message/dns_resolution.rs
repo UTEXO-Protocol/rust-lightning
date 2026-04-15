@@ -561,7 +561,9 @@ mod tests {
 	#[test]
 	#[cfg(feature = "dnssec")]
 	fn test_expiry() {
-		let keys = crate::sign::KeysManager::new(&[33; 32], 0, 0, true);
+		let kv_store: std::sync::Arc<dyn crate::util::persist::KVStoreSync + Send + Sync> =
+			std::sync::Arc::new(crate::util::test_utils::TestStore::new(false));
+		let keys = crate::sign::KeysManager::new(&[33; 32], 0, 0, true, std::path::PathBuf::from("/tmp/test_expiry"), kv_store);
 		let resolver = OMNameResolver::new(42, 42);
 		let name = HumanReadableName::new("user", "example.com").unwrap();
 

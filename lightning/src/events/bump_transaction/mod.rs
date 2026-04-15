@@ -1262,7 +1262,7 @@ mod tests {
 	use crate::sign::KeysManager;
 	use crate::types::features::ChannelTypeFeatures;
 	use crate::util::ser::Readable;
-	use crate::util::test_utils::{TestBroadcaster, TestLogger};
+	use crate::util::test_utils::{TestBroadcaster, TestLogger, TestStore};
 
 	use bitcoin::hashes::Hash;
 	use bitcoin::hex::FromHex;
@@ -1356,7 +1356,9 @@ mod tests {
 				),
 			]),
 		};
-		let signer = KeysManager::new(&[42; 32], 42, 42, true);
+		let kv_store: std::sync::Arc<dyn crate::util::persist::KVStoreSync + Send + Sync> =
+			std::sync::Arc::new(TestStore::new(false));
+		let signer = KeysManager::new(&[42; 32], 42, 42, true, std::path::PathBuf::from("/tmp/ldk_test"), kv_store);
 		let logger = TestLogger::new();
 		let handler = BumpTransactionEventHandlerSync::new(&broadcaster, &source, &signer, &logger);
 

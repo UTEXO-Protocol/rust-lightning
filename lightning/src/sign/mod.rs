@@ -1577,7 +1577,9 @@ impl EcdsaChannelSigner for InMemorySigner {
 				&keys.revocation_key,
 			);
 			if commitment_tx.is_colored() {
-				if let Err(_e) = color_htlc(&mut htlc_tx, htlc, &self.ldk_data_dir, self.rgb_kv_store.as_ref()) {
+				if let Err(_e) =
+					color_htlc(&mut htlc_tx, htlc, &self.ldk_data_dir, self.rgb_kv_store.as_ref())
+				{
 					return Err(());
 				}
 			}
@@ -2741,6 +2743,7 @@ pub mod benches {
 	use crate::sign::{EntropySource, KeysManager};
 	use bitcoin::constants::genesis_block;
 	use bitcoin::Network;
+	use std::path::PathBuf;
 	use std::sync::mpsc::TryRecvError;
 	use std::sync::{mpsc, Arc};
 	use std::thread;
@@ -2751,8 +2754,12 @@ pub mod benches {
 	pub fn bench_get_secure_random_bytes(bench: &mut Criterion) {
 		let seed = [0u8; 32];
 		let now = Duration::from_secs(genesis_block(Network::Testnet).header.time as u64);
-		let keys_manager =
-			Arc::new(KeysManager::new(&seed, now.as_secs(), now.subsec_micros(), true));
+		let kv_store: Arc<dyn crate::util::persist::KVStoreSync + Send + Sync> =
+			Arc::new(crate::util::test_utils::TestStore::new(false));
+		let keys_manager = Arc::new(KeysManager::new(
+			&seed, now.as_secs(), now.subsec_micros(), true,
+			PathBuf::from("/tmp/ldk_bench"), kv_store,
+		));
 
 		let mut handles = Vec::new();
 		let mut stops = Vec::new();

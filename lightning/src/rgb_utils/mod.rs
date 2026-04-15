@@ -339,7 +339,10 @@ where
 		let rgb_payment_info = if let Ok(data) =
 			kv_store.read(RGB_PRIMARY_NS, namespace, &htlc_proxy_id)
 		{
-			bincode::deserialize(&data).expect("valid data")
+			let mut info: RgbPaymentInfo = bincode::deserialize(&data).expect("valid data");
+			info.local_rgb_amount = rgb_info.local_rgb_amount;
+			info.remote_rgb_amount = rgb_info.remote_rgb_amount;
+			info
 		} else {
 			let rgb_payment_info = RgbPaymentInfo {
 				contract_id,
@@ -858,5 +861,9 @@ impl<K: KVStoreSync + ?Sized> RgbKvStoreExt for K {
 				Err(_) => false,
 			}
 		});
+		let has_virtual = first_hops.iter().any(|h| h.trusted_no_broadcast);
+		if has_virtual {
+			first_hops.retain(|h| h.trusted_no_broadcast);
+		}
 	}
 }

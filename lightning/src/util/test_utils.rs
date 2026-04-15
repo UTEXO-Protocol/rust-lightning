@@ -1935,12 +1935,15 @@ impl TestSignerFactory for DefaultSignerFactory {
 	fn make_signer(
 		&self, seed: &[u8; 32], now: Duration, v2_remote_key_derivation: bool,
 	) -> Box<dyn DynKeysInterfaceTrait<EcdsaSigner = DynSigner>> {
+		let kv_store: Arc<dyn KVStoreSync + Send + Sync> = Arc::new(TestStore::new(false));
 		let phantom = sign::PhantomKeysManager::new(
 			seed,
 			now.as_secs(),
 			now.subsec_nanos(),
 			seed,
 			v2_remote_key_derivation,
+			std::path::PathBuf::from("/tmp/ldk_test"),
+			kv_store,
 		);
 		let dphantom = DynPhantomKeysInterface::new(phantom);
 		let backing = Box::new(dphantom) as Box<dyn DynKeysInterfaceTrait<EcdsaSigner = DynSigner>>;

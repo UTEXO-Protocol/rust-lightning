@@ -695,9 +695,10 @@ mod tests {
 		// adding an intermediate onion layer, causing the receiver to error with "final payload
 		// provided for us as an intermediate node."
 		let secp_ctx = Secp256k1::new();
-		let bob = crate::sign::KeysManager::new(&[2; 32], 42, 42, true);
+		let rgb_kv_store: std::sync::Arc<dyn crate::util::persist::KVStoreSync + Send + Sync> = std::sync::Arc::new(crate::util::test_utils::TestStore::new(false));
+		let bob = crate::sign::KeysManager::new(&[2; 32], 42, 42, true, std::path::PathBuf::from("/tmp/ldk_test"), std::sync::Arc::clone(&rgb_kv_store));
 		let bob_pk = PublicKey::from_secret_key(&secp_ctx, &bob.get_node_secret_key());
-		let charlie = crate::sign::KeysManager::new(&[3; 32], 42, 42, true);
+		let charlie = crate::sign::KeysManager::new(&[3; 32], 42, 42, true, std::path::PathBuf::from("/tmp/ldk_test"), std::sync::Arc::clone(&rgb_kv_store));
 		let charlie_pk = PublicKey::from_secret_key(&secp_ctx, &charlie.get_node_secret_key());
 
 		let (
@@ -725,9 +726,10 @@ mod tests {
 		use super::*;
 		let secp_ctx = Secp256k1::new();
 
-		let bob = crate::sign::KeysManager::new(&[2; 32], 42, 42, true);
+		let rgb_kv_store: std::sync::Arc<dyn crate::util::persist::KVStoreSync + Send + Sync> = std::sync::Arc::new(crate::util::test_utils::TestStore::new(false));
+		let bob = crate::sign::KeysManager::new(&[2; 32], 42, 42, true, std::path::PathBuf::from("/tmp/ldk_test"), std::sync::Arc::clone(&rgb_kv_store));
 		let bob_pk = PublicKey::from_secret_key(&secp_ctx, &bob.get_node_secret_key());
-		let charlie = crate::sign::KeysManager::new(&[3; 32], 42, 42, true);
+		let charlie = crate::sign::KeysManager::new(&[3; 32], 42, 42, true, std::path::PathBuf::from("/tmp/ldk_test"), std::sync::Arc::clone(&rgb_kv_store));
 		let charlie_pk = PublicKey::from_secret_key(&secp_ctx, &charlie.get_node_secret_key());
 
 		let (session_priv, total_amt_msat, cur_height, recipient_onion, preimage, payment_hash,

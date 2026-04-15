@@ -4585,6 +4585,8 @@ pub fn create_node_chanmgrs<'a, 'b>(
 		let network = Network::Testnet;
 		let genesis_block = bitcoin::constants::genesis_block(network);
 		let params = ChainParameters { network, best_block: BestBlock::from_network(network) };
+		let rgb_kv_store: Arc<dyn crate::util::persist::KVStoreSync + Send + Sync> =
+			Arc::new(test_utils::TestStore::new(false));
 		let node = ChannelManager::new(
 			cfgs[i].fee_estimator,
 			&cfgs[i].chain_monitor,
@@ -4602,6 +4604,8 @@ pub fn create_node_chanmgrs<'a, 'b>(
 			},
 			params,
 			genesis_block.header.time,
+			std::path::PathBuf::from("/tmp/ldk_test"),
+			rgb_kv_store,
 		);
 		chanmgrs.push(node);
 	}
