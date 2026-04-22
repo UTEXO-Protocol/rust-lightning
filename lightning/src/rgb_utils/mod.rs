@@ -869,9 +869,5 @@ impl<K: KVStoreSync + ?Sized> RgbKvStoreExt for K {
 				Err(_) => false,
 			}
 		});
-		let has_virtual = first_hops.iter().any(|h| h.trusted_no_broadcast);
-		if has_virtual {
-			first_hops.retain(|h| h.trusted_no_broadcast);
-		}
 	}
 }
