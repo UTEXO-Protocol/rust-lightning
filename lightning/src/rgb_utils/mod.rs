@@ -336,25 +336,26 @@ where
 				.expect("able to remove pending payment info");
 		}
 
+		// The only authoritative per-HTLC key here is `htlc_proxy_id = chan_id || payment_hash`:
+		// it's scoped to THIS channel and therefore cannot bleed into another channel that happens
+		// to see the same payment_hash (e.g. two legs of an atomic RGB swap where each leg is
+		// colored with a different asset). Any lookup keyed only by `payment_hash` would read a
+		// record written by a sibling channel and poison this channel's commitment coloring.
 		let rgb_payment_info = if let Ok(data) =
 			kv_store.read(RGB_PRIMARY_NS, namespace, &htlc_proxy_id)
 		{
-			let mut info: RgbPaymentInfo = bincode::deserialize(&data).expect("valid data");
-			info.local_rgb_amount = rgb_info.local_rgb_amount;
-			info.remote_rgb_amount = rgb_info.remote_rgb_amount;
-			info
-		} else if let Ok(mut info) = kv_store.read_rgb_payment_info(&htlc.payment_hash, inbound) {
-			info.local_rgb_amount = rgb_info.local_rgb_amount;
-			info.remote_rgb_amount = rgb_info.remote_rgb_amount;
-			let data = bincode::serialize(&info).expect("valid rgb payment info");
-			kv_store
-				.write(RGB_PRIMARY_NS, namespace, &htlc_proxy_id, data.clone())
-				.expect("able to write rgb payment info");
-			kv_store
-				.write(RGB_PRIMARY_NS, namespace, &htlc_proxy_id_pending, data)
-				.expect("able to write rgb pending payment info");
-			info
+			// Subsequent commitment updates on this channel reuse the record persisted during
+			// the first commitment that carried this HTLC.
+			bincode::deserialize(&data).expect("valid data")
 		} else {
+			// First commitment to carry this HTLC on this channel. Synthesize the record from
+			// strictly channel-scoped inputs:
+			//   - `contract_id` and balances from `rgb_info` (this channel's asset)
+			//   - `htlc_amount_rgb` from the HTLC itself
+			//   - `inbound` from `htlc.offered` vs `counterparty`
+			// `swap_payment` is hardcoded `true` because this fallback only runs on forwarders:
+			// sender-side payments pre-write the authoritative record via
+			// `write_rgb_payment_info_file` before the first commitment is built.
 			let rgb_payment_info = RgbPaymentInfo {
 				contract_id,
 				amount: htlc_amount_rgb,
