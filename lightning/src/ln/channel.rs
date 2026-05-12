@@ -3235,7 +3235,6 @@ where
 				&self.funding(),
 				&mut commitment_data.tx,
 				false,
-				self.funding().is_outbound(),
 			)
 			.expect("successful commitment coloring");
 		}
@@ -3281,7 +3280,7 @@ where
 			context.counterparty_next_commitment_transaction_number,
 			&context.counterparty_next_commitment_point.unwrap(), false, false, logger);
 		if self.context().is_colored() {
-			color_commitment(&self.context(), &self.funding(), &mut commitment_data.tx, true, false)
+			color_commitment(&self.context(), &self.funding(), &mut commitment_data.tx, true)
 				.unwrap();
 		}
 		let counterparty_initial_commitment_tx = commitment_data.tx;
@@ -5128,7 +5127,6 @@ where
 				&funding,
 				&mut commitment_data.tx,
 				false,
-				funding.is_outbound(),
 			)
 			.expect("successful commitment coloring");
 		}
@@ -6459,7 +6457,7 @@ where
 			logger,
 		);
 		if self.is_colored() {
-			color_commitment(&self, &funding, &mut commitment_data.tx, true, false)
+			color_commitment(&self, &funding, &mut commitment_data.tx, true)
 				.expect("successful commitment coloring");
 		}
 		let counterparty_initial_commitment_tx = commitment_data.tx;
@@ -8176,7 +8174,6 @@ where
 				&pending_splice_funding,
 				&mut counterparty_commitment_tx,
 				true,
-				false,
 			)
 			.expect("successful commitment coloring");
 		}
@@ -9777,7 +9774,7 @@ where
 				self.context.counterparty_next_commitment_transaction_number + 1,
 				&self.context.counterparty_next_commitment_point.unwrap(), false, false, logger);
 			if self.context.is_colored() {
-				color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true, false)
+				color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true)
 					.expect("successful commitment coloring");
 			}
 			let counterparty_initial_commitment_tx = commitment_data.tx;
@@ -13101,7 +13098,7 @@ where
 			&self.context.counterparty_next_commitment_point.unwrap(), false, true, logger,
 		);
 		if self.context.is_colored() {
-			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true, false)
+			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true)
 				.expect("successful commitment coloring");
 		}
 		let counterparty_commitment_tx = commitment_data.tx;
@@ -13139,7 +13136,7 @@ where
 			&self.context.counterparty_next_commitment_point.unwrap(), false, true, logger,
 		);
 		if self.context.is_colored() {
-			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true, false)?;
+			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true)?;
 		}
 		let counterparty_commitment_tx = commitment_data.tx;
 
@@ -13745,7 +13742,7 @@ where
 			self.context.counterparty_next_commitment_transaction_number,
 			&self.context.counterparty_next_commitment_point.unwrap(), false, false, logger);
 		if self.context.is_colored() {
-			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true, false)
+			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true)
 				.unwrap();
 		}
 		let counterparty_initial_commitment_tx = commitment_data.tx;

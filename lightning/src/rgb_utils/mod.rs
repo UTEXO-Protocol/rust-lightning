@@ -218,8 +218,7 @@ fn _get_wallet_data(
 /// Uses [`std::thread::scope`] instead of Tokio [`tokio::task::spawn_blocking`] because
 /// [`color_commitment`] / [`color_htlc`] / [`color_closing`] run from synchronous LDK channel
 /// logic that may execute on a Tokio worker; awaiting a Tokio blocking task from
-/// [`futures::executor::block_on`] can stall the runtime and block unrelated work (for example
-/// funding transaction broadcast handling).
+/// [`futures::executor::block_on`] can stall the runtime and block unrelated work.
 fn _get_rgb_wallet_online_blocking(
 	ldk_data_dir: &Path, kv_store: &dyn KVStoreSync,
 ) -> Result<Wallet, RgbLibError> {
@@ -300,22 +299,9 @@ pub fn is_tx_colored(tx: &Transaction) -> bool {
 }
 
 /// Color commitment transaction
-///
-/// `counterparty` selects which funding keys / output-side RGB amounts follow the
-/// counterparty-vs-holder perspective (see `vout_p2wpkh_amt` / `payment_point` below).
-///
-/// When `htlc_rgb_inbound_as_signer` is **true**, HTLC RGB KV lookup uses `inbound = htlc.offered`
-/// (same convention as the remote signer when they build with `color_commitment(..., true)`).
-/// Callers that re-color **our holder commitment** only to **verify the counterparty's
-/// funding signature** on an **outbound** channel (`FundingScope::is_outbound`) should pass `true`
-/// while keeping `counterparty: false`, so HTLC accounting matches the peer signer for funding
-/// sighash. For **inbound** (fundee) channels, pass `false` so `inbound = htlc.offered ==
-/// counterparty` (i.e. `!htlc.offered` here): the opener-aligned convention would mis-classify
-/// incoming HTLCs when local RGB balance is zero and break commitment coloring.
 pub(crate) fn color_commitment<SP: Deref>(
 	channel_context: &ChannelContext<SP>, funding_scope: &FundingScope,
 	commitment_transaction: &mut CommitmentTransaction, counterparty: bool,
-	htlc_rgb_inbound_as_signer: bool,
 ) -> Result<(), ChannelError>
 where
 	<SP as std::ops::Deref>::Target: SignerProvider,
@@ -343,11 +329,7 @@ where
 
 		let htlc_vout = htlc.transaction_output_index.unwrap();
 
-		let inbound = if htlc_rgb_inbound_as_signer {
-			htlc.offered
-		} else {
-			htlc.offered == counterparty
-		};
+		let inbound = htlc.offered == counterparty;
 
 		let htlc_payment_hash = htlc.payment_hash.0.as_hex().to_string();
 		let htlc_proxy_id = format!("{chan_id}{htlc_payment_hash}");
