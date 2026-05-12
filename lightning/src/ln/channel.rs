@@ -78,7 +78,9 @@ use crate::ln::types::ChannelId;
 use crate::ln::LN_MAX_MSG_LEN;
 use crate::offers::static_invoice::StaticInvoice;
 use crate::rgb_utils::{
-	color_closing, color_commitment, color_htlc, get_rgb_channel_info_pending, rename_rgb_files,
+	color_closing, color_commitment, color_htlc, get_rgb_channel_info_pending,
+	holder_validate_install_psbt_output_witness_scripts_hex,
+	holder_validate_take_psbt_output_witness_scripts_hex, is_tx_colored, rename_rgb_files,
 	update_rgb_channel_amount_pending, RgbKvStoreExt,
 };
 use crate::routing::gossip::NodeId;
@@ -110,6 +112,28 @@ use core::time::Duration;
 use core::{cmp, fmt, mem};
 
 use super::channel_keys::{DelayedPaymentBasepoint, HtlcBasepoint, RevocationBasepoint};
+
+fn rgb_install_holder_validate_psbt_witness_scripts_if_colored(
+	funding: &FundingScope,
+	commitment_tx: &CommitmentTransaction,
+) -> Result<(), ChannelError> {
+	let is_rgb_channel = funding.push_asset_amount.is_some() || funding.consignment_endpoint.is_some();
+	if !is_rgb_channel && !is_tx_colored(&commitment_tx.trust().built_transaction().transaction) {
+		return Ok(());
+	}
+	let directed = funding.channel_transaction_parameters.as_holder_broadcastable();
+	let wits = commitment_tx
+		.output_witness_scripts_for_vls_validate(&directed)
+		.map_err(|_| {
+			ChannelError::close(
+				"failed to build PSBT witness scripts for external RGB holder validate".to_owned(),
+			)
+		})?;
+	let hex_scripts: Vec<String> =
+		wits.iter().map(|s| s.as_bytes().to_lower_hex_string()).collect();
+	holder_validate_install_psbt_output_witness_scripts_hex(hex_scripts);
+	Ok(())
+}
 
 #[cfg(any(test, feature = "_test_utils"))]
 #[allow(unused)]
@@ -3206,7 +3230,14 @@ where
 			holder_commitment_point.next_transaction_number(), &holder_commitment_point.next_point(),
 			true, false, logger);
 		if self.context().is_colored() {
-			color_commitment(&self.context(), &self.funding(), &mut commitment_data.tx, false).expect("successful commitment coloring");
+			color_commitment(
+				&self.context(),
+				&self.funding(),
+				&mut commitment_data.tx,
+				false,
+				self.funding().is_outbound(),
+			)
+			.expect("successful commitment coloring");
 		}
 		let initial_commitment_tx = commitment_data.tx;
 		let trusted_tx = initial_commitment_tx.trust();
@@ -3250,7 +3281,8 @@ where
 			context.counterparty_next_commitment_transaction_number,
 			&context.counterparty_next_commitment_point.unwrap(), false, false, logger);
 		if self.context().is_colored() {
-			color_commitment(&self.context(), &self.funding(), &mut commitment_data.tx, true).unwrap();
+			color_commitment(&self.context(), &self.funding(), &mut commitment_data.tx, true, false)
+				.unwrap();
 		}
 		let counterparty_initial_commitment_tx = commitment_data.tx;
 		let counterparty_trusted_tx = counterparty_initial_commitment_tx.trust();
@@ -3267,7 +3299,16 @@ where
 			&self.funding().counterparty_funding_pubkey()
 		);
 
-		if context.holder_signer.as_ref().validate_holder_commitment(&holder_commitment_tx, Vec::new()).is_err() {
+		rgb_install_holder_validate_psbt_witness_scripts_if_colored(
+			self.funding(),
+			holder_commitment_tx.deref(),
+		)?;
+		let validate_res = context
+			.holder_signer
+			.as_ref()
+			.validate_holder_commitment(&holder_commitment_tx, Vec::new());
+		let _ = holder_validate_take_psbt_output_witness_scripts_hex();
+		if validate_res.is_err() {
 			return Err(ChannelError::close("Failed to validate our commitment".to_owned()));
 		}
 
@@ -5082,8 +5123,14 @@ where
 			logger,
 		);
 		if self.is_colored() {
-			color_commitment(&self, &funding, &mut commitment_data.tx, false)
-				.expect("successful commitment coloring");
+			color_commitment(
+				&self,
+				&funding,
+				&mut commitment_data.tx,
+				false,
+				funding.is_outbound(),
+			)
+			.expect("successful commitment coloring");
 		}
 		let commitment_txid = {
 			let trusted_tx = commitment_data.tx.trust();
@@ -5181,6 +5228,7 @@ where
 			}
 		}
 
+		rgb_install_holder_validate_psbt_witness_scripts_if_colored(funding, &commitment_data.tx)?;
 		let holder_commitment_tx = HolderCommitmentTransaction::new(
 			commitment_data.tx,
 			msg.signature,
@@ -5189,12 +5237,12 @@ where
 			funding.counterparty_funding_pubkey(),
 		);
 
-		self.holder_signer
-			.as_ref()
-			.validate_holder_commitment(
-				&holder_commitment_tx,
-				commitment_data.outbound_htlc_preimages,
-			)
+		let validate_res = self.holder_signer.as_ref().validate_holder_commitment(
+			&holder_commitment_tx,
+			commitment_data.outbound_htlc_preimages,
+		);
+		let _ = holder_validate_take_psbt_output_witness_scripts_hex();
+		validate_res
 			.map_err(|_| ChannelError::close("Failed to validate our commitment".to_owned()))?;
 
 		Ok((holder_commitment_tx, commitment_data.htlcs_included))
@@ -5506,6 +5554,8 @@ where
 				assert_eq!(predicted_fee_sat, stats.commit_tx_fee_sat);
 			}
 		}
+		#[cfg(not(any(test, fuzzing, debug_assertions)))]
+		let _ = stats;
 		#[cfg(debug_assertions)]
 		{
 			// Make sure that the to_self/to_remote is always either past the appropriate
@@ -6409,7 +6459,7 @@ where
 			logger,
 		);
 		if self.is_colored() {
-			color_commitment(&self, &funding, &mut commitment_data.tx, true)
+			color_commitment(&self, &funding, &mut commitment_data.tx, true, false)
 				.expect("successful commitment coloring");
 		}
 		let counterparty_initial_commitment_tx = commitment_data.tx;
@@ -8126,6 +8176,7 @@ where
 				&pending_splice_funding,
 				&mut counterparty_commitment_tx,
 				true,
+				false,
 			)
 			.expect("successful commitment coloring");
 		}
@@ -9726,7 +9777,8 @@ where
 				self.context.counterparty_next_commitment_transaction_number + 1,
 				&self.context.counterparty_next_commitment_point.unwrap(), false, false, logger);
 			if self.context.is_colored() {
-				color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true).expect("successful commitment coloring");
+				color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true, false)
+					.expect("successful commitment coloring");
 			}
 			let counterparty_initial_commitment_tx = commitment_data.tx;
 			self.context.get_funding_signed_msg(&self.funding.channel_transaction_parameters, logger, counterparty_initial_commitment_tx)
@@ -13049,7 +13101,8 @@ where
 			&self.context.counterparty_next_commitment_point.unwrap(), false, true, logger,
 		);
 		if self.context.is_colored() {
-			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true).expect("successful commitment coloring");
+			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true, false)
+				.expect("successful commitment coloring");
 		}
 		let counterparty_commitment_tx = commitment_data.tx;
 
@@ -13086,7 +13139,7 @@ where
 			&self.context.counterparty_next_commitment_point.unwrap(), false, true, logger,
 		);
 		if self.context.is_colored() {
-			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true)?;
+			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true, false)?;
 		}
 		let counterparty_commitment_tx = commitment_data.tx;
 
@@ -13692,7 +13745,8 @@ where
 			self.context.counterparty_next_commitment_transaction_number,
 			&self.context.counterparty_next_commitment_point.unwrap(), false, false, logger);
 		if self.context.is_colored() {
-			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true).unwrap();
+			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true, false)
+				.unwrap();
 		}
 		let counterparty_initial_commitment_tx = commitment_data.tx;
 		let signature = match &self.context.holder_signer {

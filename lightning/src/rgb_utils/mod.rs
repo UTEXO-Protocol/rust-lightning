@@ -31,6 +31,7 @@ use tokio::runtime::Handle;
 
 use crate::io;
 use core::ops::Deref;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
@@ -211,21 +212,40 @@ fn _get_wallet_data(
 	(data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint, reuse_addresses)
 }
 
-async fn _get_rgb_wallet(ldk_data_dir: &Path, kv_store: &dyn KVStoreSync) -> Wallet {
+/// Open the rgb-lib wallet on a dedicated thread and bring it online so DB-backed RGB inventory
+/// is visible to [`Wallet::color_psbt`].
+///
+/// Uses [`std::thread::scope`] instead of Tokio [`tokio::task::spawn_blocking`] because
+/// [`color_commitment`] / [`color_htlc`] / [`color_closing`] run from synchronous LDK channel
+/// logic that may execute on a Tokio worker; awaiting a Tokio blocking task from
+/// [`futures::executor::block_on`] can stall the runtime and block unrelated work (for example
+/// funding transaction broadcast handling).
+fn _get_rgb_wallet_online_blocking(
+	ldk_data_dir: &Path, kv_store: &dyn KVStoreSync,
+) -> Result<Wallet, RgbLibError> {
 	let (data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint, reuse_addresses) =
 		_get_wallet_data(ldk_data_dir, kv_store);
-	tokio::task::spawn_blocking(move || {
-		_new_rgb_wallet(
-			data_dir,
-			bitcoin_network,
-			account_xpub_vanilla,
-			account_xpub_colored,
-			master_fingerprint,
-			reuse_addresses,
-		)
+	let indexer_url = _get_indexer_url(kv_store);
+	std::thread::scope(|s| {
+		let jh = s.spawn(move || -> Result<Wallet, RgbLibError> {
+			let mut wallet = _new_rgb_wallet(
+				data_dir,
+				bitcoin_network,
+				account_xpub_vanilla,
+				account_xpub_colored,
+				master_fingerprint,
+				reuse_addresses,
+			);
+			wallet.go_online(true, indexer_url)?;
+			Ok(wallet)
+		});
+		match jh.join() {
+			Ok(res) => res,
+			Err(_) => Err(RgbLibError::Internal {
+				details: "rgb-lib wallet thread panicked during go_online".to_owned(),
+			}),
+		}
 	})
-	.await
-	.unwrap()
 }
 
 async fn _accept_transfer(
@@ -280,9 +300,22 @@ pub fn is_tx_colored(tx: &Transaction) -> bool {
 }
 
 /// Color commitment transaction
+///
+/// `counterparty` selects which funding keys / output-side RGB amounts follow the
+/// counterparty-vs-holder perspective (see `vout_p2wpkh_amt` / `payment_point` below).
+///
+/// When `htlc_rgb_inbound_as_signer` is **true**, HTLC RGB KV lookup uses `inbound = htlc.offered`
+/// (same convention as the remote signer when they build with `color_commitment(..., true)`).
+/// Callers that re-color **our holder commitment** only to **verify the counterparty's
+/// funding signature** on an **outbound** channel (`FundingScope::is_outbound`) should pass `true`
+/// while keeping `counterparty: false`, so HTLC accounting matches the peer signer for funding
+/// sighash. For **inbound** (fundee) channels, pass `false` so `inbound = htlc.offered ==
+/// counterparty` (i.e. `!htlc.offered` here): the opener-aligned convention would mis-classify
+/// incoming HTLCs when local RGB balance is zero and break commitment coloring.
 pub(crate) fn color_commitment<SP: Deref>(
 	channel_context: &ChannelContext<SP>, funding_scope: &FundingScope,
 	commitment_transaction: &mut CommitmentTransaction, counterparty: bool,
+	htlc_rgb_inbound_as_signer: bool,
 ) -> Result<(), ChannelError>
 where
 	<SP as std::ops::Deref>::Target: SignerProvider,
@@ -310,7 +343,11 @@ where
 
 		let htlc_vout = htlc.transaction_output_index.unwrap();
 
-		let inbound = htlc.offered == counterparty;
+		let inbound = if htlc_rgb_inbound_as_signer {
+			htlc.offered
+		} else {
+			htlc.offered == counterparty
+		};
 
 		let htlc_payment_hash = htlc.payment_hash.0.as_hex().to_string();
 		let htlc_proxy_id = format!("{chan_id}{htlc_payment_hash}");
@@ -465,10 +502,11 @@ where
 	};
 	let psbt = Psbt::from_unsigned_tx(commitment_tx.clone()).unwrap();
 	let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
-	let handle = Handle::current();
-	let _ = handle.enter();
-	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
-	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
+	let wallet = _get_rgb_wallet_online_blocking(ldk_data_dir, kv_store)
+		.map_err(|e| ChannelError::close(format!("RGB wallet go_online for commitment coloring: {e}")))?;
+	let (fascia, _) = wallet
+		.color_psbt(&mut psbt, coloring_info)
+		.map_err(|e| ChannelError::close(format!("RGB color_psbt (commitment): {e}")))?;
 	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
 	let modified_tx = match psbt.extract_tx() {
 		Ok(tx) => tx,
@@ -479,7 +517,9 @@ where
 	let txid = modified_tx.compute_txid();
 	commitment_transaction.built = BuiltCommitmentTransaction { transaction: modified_tx, txid };
 
-	wallet.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored)).unwrap();
+	wallet
+		.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored))
+		.map_err(|e| ChannelError::close(format!("RGB consume_fascia (commitment): {e}")))?;
 
 	let rgb_amount = if counterparty {
 		vout_p2wpkh_amt + rgb_offered_htlc
@@ -519,10 +559,11 @@ pub(crate) fn color_htlc(
 	};
 	let psbt = Psbt::from_unsigned_tx(htlc_tx.clone()).unwrap();
 	let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
-	let handle = Handle::current();
-	let _ = handle.enter();
-	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
-	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
+	let wallet = _get_rgb_wallet_online_blocking(ldk_data_dir, kv_store)
+		.map_err(|e| ChannelError::close(format!("RGB wallet go_online for HTLC coloring: {e}")))?;
+	let (fascia, _) = wallet
+		.color_psbt(&mut psbt, coloring_info)
+		.map_err(|e| ChannelError::close(format!("RGB color_psbt (htlc): {e}")))?;
 	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
 	let modified_tx = match psbt.extract_tx() {
 		Ok(tx) => tx,
@@ -531,7 +572,9 @@ pub(crate) fn color_htlc(
 	};
 	let txid = &modified_tx.compute_txid();
 
-	wallet.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored)).unwrap();
+	wallet
+		.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored))
+		.map_err(|e| ChannelError::close(format!("RGB consume_fascia (htlc): {e}")))?;
 
 	let transfer_info = TransferInfo { contract_id, rgb_amount: htlc_amount_rgb };
 	kv_store.write_rgb_transfer_info(&txid.to_string(), &transfer_info);
@@ -581,10 +624,11 @@ pub(crate) fn color_closing(
 	};
 	let psbt = Psbt::from_unsigned_tx(closing_tx.clone()).unwrap();
 	let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
-	let handle = Handle::current();
-	let _ = handle.enter();
-	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
-	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
+	let wallet = _get_rgb_wallet_online_blocking(ldk_data_dir, kv_store)
+		.map_err(|e| ChannelError::close(format!("RGB wallet go_online for closing coloring: {e}")))?;
+	let (fascia, _) = wallet
+		.color_psbt(&mut psbt, coloring_info)
+		.map_err(|e| ChannelError::close(format!("RGB color_psbt (closing): {e}")))?;
 	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
 	let modified_tx = match psbt.extract_tx() {
 		Ok(tx) => tx,
@@ -595,7 +639,9 @@ pub(crate) fn color_closing(
 	let txid = &modified_tx.compute_txid();
 	closing_transaction.built = modified_tx;
 
-	wallet.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored)).unwrap();
+	wallet
+		.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored))
+		.map_err(|e| ChannelError::close(format!("RGB consume_fascia (closing): {e}")))?;
 
 	let transfer_info = TransferInfo { contract_id, rgb_amount: holder_vout_amount };
 	kv_store.write_rgb_transfer_info(&txid.to_string(), &transfer_info);
@@ -899,4 +945,20 @@ impl<K: KVStoreSync + ?Sized> RgbKvStoreExt for K {
 			}
 		});
 	}
+}
+
+thread_local! {
+	static HOLDER_VALIDATE_PSBT_WITNESS_SCRIPTS_HEX: RefCell<Option<Vec<String>>> =
+		RefCell::new(None);
+}
+
+/// Installed by [`crate::ln::channel`] before [`crate::sign::ChannelSigner::validate_holder_commitment`]
+/// on RGB-colored holder commitments so an external signer can attach PSBT `witness_script`s for VLS.
+pub fn holder_validate_install_psbt_output_witness_scripts_hex(hex_scripts: Vec<String>) {
+	HOLDER_VALIDATE_PSBT_WITNESS_SCRIPTS_HEX.with(|c| *c.borrow_mut() = Some(hex_scripts));
+}
+
+/// Removes and returns witness script hex strings installed by [`holder_validate_install_psbt_output_witness_scripts_hex`], if any.
+pub fn holder_validate_take_psbt_output_witness_scripts_hex() -> Option<Vec<String>> {
+	HOLDER_VALIDATE_PSBT_WITNESS_SCRIPTS_HEX.with(|c| c.borrow_mut().take())
 }
