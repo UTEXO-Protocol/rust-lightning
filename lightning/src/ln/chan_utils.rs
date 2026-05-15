@@ -10,6 +10,7 @@
 //! Various utilities for building scripts related to channels. These are
 //! largely of interest for those implementing the traits on [`crate::sign`] by hand.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use bitcoin::amount::Amount;
@@ -1816,6 +1817,98 @@ impl CommitmentTransaction {
 			txid
 		};
 		Ok(built_transaction)
+	}
+
+	/// P2WSH witness redeem scripts for each output of [`Self::built`], ordered like
+	/// `built.transaction.output`. Used for VLS `ValidateCommitmentTx` PSBT `witness_script`
+	/// fields (RGB commitments may add `OP_RETURN` outputs that are not in this map).
+	///
+	/// For non-P2WSH outputs (P2WPKH, P2A, `OP_RETURN`, …) returns an empty [`ScriptBuf`].
+	pub fn output_witness_scripts_for_vls_validate<'a>(
+		&self,
+		channel_parameters: &DirectedChannelTransactionParameters<'a>,
+	) -> Result<Vec<ScriptBuf>, ()> {
+		let mut spk_to_wit: HashMap<Vec<u8>, ScriptBuf> = HashMap::new();
+		Self::register_holder_commitment_p2wsh_witness_scripts(
+			&mut spk_to_wit,
+			&self.keys,
+			self.to_broadcaster_value_sat,
+			self.to_countersignatory_value_sat,
+			&self.nondust_htlcs,
+			channel_parameters,
+		);
+		let mut out = Vec::with_capacity(self.built.transaction.output.len());
+		for txo in &self.built.transaction.output {
+			if txo.script_pubkey.is_op_return() {
+				out.push(ScriptBuf::new());
+				continue;
+			}
+			if txo.script_pubkey.is_p2wpkh() {
+				out.push(ScriptBuf::new());
+				continue;
+			}
+			if txo.script_pubkey.is_p2wsh() {
+				let k = txo.script_pubkey.as_bytes().to_vec();
+				let wit = spk_to_wit.get(&k).ok_or(())?;
+				out.push(wit.clone());
+				continue;
+			}
+			out.push(ScriptBuf::new());
+		}
+		Ok(out)
+	}
+
+	fn register_holder_commitment_p2wsh_witness_scripts<'a>(
+		spk_to_wit: &mut HashMap<Vec<u8>, ScriptBuf>,
+		keys: &TxCreationKeys,
+		to_broadcaster_value_sat: Amount,
+		to_countersignatory_value_sat: Amount,
+		nondust_htlcs: &[HTLCOutputInCommitment],
+		channel_parameters: &DirectedChannelTransactionParameters<'a>,
+	) {
+		let channel_type = channel_parameters.channel_type_features();
+		for htlc in nondust_htlcs {
+			let wit = get_htlc_redeemscript(htlc, channel_type, keys);
+			spk_to_wit.insert(wit.to_p2wsh().as_bytes().to_vec(), wit);
+		}
+
+		let countersignatory_payment_point =
+			&channel_parameters.countersignatory_pubkeys().payment_point;
+		let countersignatory_funding_key =
+			&channel_parameters.countersignatory_pubkeys().funding_pubkey;
+		let broadcaster_funding_key = &channel_parameters.broadcaster_pubkeys().funding_pubkey;
+		let contest_delay = channel_parameters.contest_delay();
+		let nondust_htlcs_value_sum_sat: Amount =
+			nondust_htlcs.iter().map(|h| h.to_bitcoin_amount()).sum();
+		let tx_has_htlc_outputs = nondust_htlcs_value_sum_sat != Amount::ZERO;
+
+		if to_countersignatory_value_sat > Amount::ZERO {
+			if channel_type.supports_anchors_zero_fee_htlc_tx() {
+				let wit = get_to_countersigner_keyed_anchor_redeemscript(countersignatory_payment_point);
+				spk_to_wit.insert(wit.to_p2wsh().as_bytes().to_vec(), wit);
+			}
+		}
+
+		if to_broadcaster_value_sat > Amount::ZERO {
+			let redeem_script = get_revokeable_redeemscript(
+				&keys.revocation_key,
+				contest_delay,
+				&keys.broadcaster_delayed_payment_key,
+			);
+			spk_to_wit.insert(redeem_script.to_p2wsh().as_bytes().to_vec(), redeem_script);
+		}
+
+		if channel_type.supports_anchors_zero_fee_htlc_tx() {
+			if to_broadcaster_value_sat > Amount::ZERO || tx_has_htlc_outputs {
+				let wit = get_keyed_anchor_redeemscript(broadcaster_funding_key);
+				spk_to_wit.insert(wit.to_p2wsh().as_bytes().to_vec(), wit);
+			}
+
+			if to_countersignatory_value_sat > Amount::ZERO || tx_has_htlc_outputs {
+				let wit = get_keyed_anchor_redeemscript(countersignatory_funding_key);
+				spk_to_wit.insert(wit.to_p2wsh().as_bytes().to_vec(), wit);
+			}
+		}
 	}
 
 	#[rustfmt::skip]

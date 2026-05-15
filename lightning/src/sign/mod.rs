@@ -1314,6 +1314,70 @@ impl InMemorySigner {
 		self.funding_key.with_tweak(tweak)
 	}
 
+	/// Signs HTLC second-level transactions for a counterparty commitment.
+	///
+	/// `commitment_txid_for_htlc_txs` is normally the commitment txid from the recomposed
+	/// transaction. When the wire commitment (e.g. RGB) differs, pass the wire txid so sighashes
+	/// match what the peer verifies.
+	pub fn sign_counterparty_commitment_htlc_signatures(
+		&self, channel_parameters: &ChannelTransactionParameters,
+		commitment_tx: &CommitmentTransaction, commitment_txid_for_htlc_txs: Txid,
+		secp_ctx: &Secp256k1<secp256k1::All>,
+	) -> Result<Vec<Signature>, ()> {
+		assert!(channel_parameters.is_populated(), "Channel parameters must be fully populated");
+
+		let trusted_tx = commitment_tx.trust();
+		let keys = trusted_tx.keys();
+
+		let mut htlc_sigs = Vec::with_capacity(commitment_tx.nondust_htlcs().len());
+		for htlc in commitment_tx.nondust_htlcs() {
+			let holder_selected_contest_delay = channel_parameters.holder_selected_contest_delay;
+			let chan_type = &channel_parameters.channel_type_features;
+			let mut htlc_tx = chan_utils::build_htlc_transaction(
+				&commitment_txid_for_htlc_txs,
+				commitment_tx.negotiated_feerate_per_kw(),
+				holder_selected_contest_delay,
+				htlc,
+				chan_type,
+				&keys.broadcaster_delayed_payment_key,
+				&keys.revocation_key,
+			);
+			if commitment_tx.is_colored() {
+				if let Err(_e) =
+					color_htlc(&mut htlc_tx, htlc, &self.ldk_data_dir, self.rgb_kv_store.as_ref())
+				{
+					return Err(());
+				}
+			}
+			let htlc_redeemscript = chan_utils::get_htlc_redeemscript(&htlc, chan_type, &keys);
+			let htlc_sighashtype = if chan_type.supports_anchors_zero_fee_htlc_tx()
+				|| chan_type.supports_anchor_zero_fee_commitments()
+			{
+				EcdsaSighashType::SinglePlusAnyoneCanPay
+			} else {
+				EcdsaSighashType::All
+			};
+			let htlc_sighash = hash_to_message!(
+				&sighash::SighashCache::new(&htlc_tx)
+					.p2wsh_signature_hash(
+						0,
+						&htlc_redeemscript,
+						htlc.to_bitcoin_amount(),
+						htlc_sighashtype
+					)
+					.unwrap()[..]
+			);
+			let holder_htlc_key = chan_utils::derive_private_key(
+				secp_ctx,
+				&keys.per_commitment_point,
+				&self.htlc_base_key,
+			);
+			htlc_sigs.push(sign(secp_ctx, &htlc_sighash, &holder_htlc_key));
+		}
+
+		Ok(htlc_sigs)
+	}
+
 	/// Sign the single input of `spend_tx` at index `input_idx`, which spends the output described
 	/// by `descriptor`, returning the witness stack for the input.
 	///
@@ -1545,7 +1609,6 @@ impl EcdsaChannelSigner for InMemorySigner {
 		assert!(channel_parameters.is_populated(), "Channel parameters must be fully populated");
 
 		let trusted_tx = commitment_tx.trust();
-		let keys = trusted_tx.keys();
 
 		let funding_key = self.funding_key(channel_parameters.splice_parent_funding_txid);
 		let funding_pubkey = funding_key.public_key(secp_ctx);
@@ -1563,51 +1626,12 @@ impl EcdsaChannelSigner for InMemorySigner {
 		);
 		let commitment_txid = built_tx.txid;
 
-		let mut htlc_sigs = Vec::with_capacity(commitment_tx.nondust_htlcs().len());
-		for htlc in commitment_tx.nondust_htlcs() {
-			let holder_selected_contest_delay = channel_parameters.holder_selected_contest_delay;
-			let chan_type = &channel_parameters.channel_type_features;
-			let mut htlc_tx = chan_utils::build_htlc_transaction(
-				&commitment_txid,
-				commitment_tx.negotiated_feerate_per_kw(),
-				holder_selected_contest_delay,
-				htlc,
-				chan_type,
-				&keys.broadcaster_delayed_payment_key,
-				&keys.revocation_key,
-			);
-			if commitment_tx.is_colored() {
-				if let Err(_e) =
-					color_htlc(&mut htlc_tx, htlc, &self.ldk_data_dir, self.rgb_kv_store.as_ref())
-				{
-					return Err(());
-				}
-			}
-			let htlc_redeemscript = chan_utils::get_htlc_redeemscript(&htlc, chan_type, &keys);
-			let htlc_sighashtype = if chan_type.supports_anchors_zero_fee_htlc_tx()
-				|| chan_type.supports_anchor_zero_fee_commitments()
-			{
-				EcdsaSighashType::SinglePlusAnyoneCanPay
-			} else {
-				EcdsaSighashType::All
-			};
-			let htlc_sighash = hash_to_message!(
-				&sighash::SighashCache::new(&htlc_tx)
-					.p2wsh_signature_hash(
-						0,
-						&htlc_redeemscript,
-						htlc.to_bitcoin_amount(),
-						htlc_sighashtype
-					)
-					.unwrap()[..]
-			);
-			let holder_htlc_key = chan_utils::derive_private_key(
-				&secp_ctx,
-				&keys.per_commitment_point,
-				&self.htlc_base_key,
-			);
-			htlc_sigs.push(sign(secp_ctx, &htlc_sighash, &holder_htlc_key));
-		}
+		let htlc_sigs = self.sign_counterparty_commitment_htlc_signatures(
+			channel_parameters,
+			commitment_tx,
+			commitment_txid,
+			secp_ctx,
+		)?;
 
 		Ok((commitment_sig, htlc_sigs))
 	}
