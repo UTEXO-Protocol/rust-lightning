@@ -32,6 +32,7 @@ use crate::offers::offer::{
 	OfferId, OfferTlvStream, OfferTlvStreamRef, Quantity, EXPERIMENTAL_OFFER_TYPES, OFFER_TYPES,
 };
 use crate::offers::parse::{Bolt12ParseError, Bolt12SemanticError, ParsedMessage};
+use crate::sign::NodeSigner;
 use crate::types::features::{Bolt12InvoiceFeatures, OfferFeatures};
 use crate::types::string::PrintableString;
 use crate::util::ser::{
@@ -41,6 +42,7 @@ use bitcoin::address::Address;
 use bitcoin::constants::ChainHash;
 use bitcoin::secp256k1::schnorr::Signature;
 use bitcoin::secp256k1::{self, Keypair, PublicKey, Secp256k1};
+use core::ops::Deref;
 use core::time::Duration;
 
 #[cfg(feature = "std")]
@@ -138,6 +140,47 @@ impl<'a> StaticInvoiceBuilder<'a> {
 
 		let keys = offer
 			.verify(nonce, &expanded_key, &secp_ctx)
+			.map_err(|()| Bolt12SemanticError::InvalidMetadata)?
+			.1
+			.ok_or(Bolt12SemanticError::MissingSigningPubkey)?;
+
+		let signing_pubkey = keys.public_key();
+		if signing_pubkey != issuer_signing_pubkey {
+			return Err(Bolt12SemanticError::InvalidSigningPubkey);
+		}
+
+		let invoice =
+			InvoiceContents::new(offer, payment_paths, message_paths, created_at, signing_pubkey);
+
+		Ok(Self { offer_bytes: &offer.bytes, invoice, keys })
+	}
+
+	/// Similar to [`StaticInvoiceBuilder::for_offer_using_derived_keys`] but derives offer keys
+	/// using signer-owned inbound payment material instead of requiring direct access to an
+	/// [`ExpandedKey`].
+	///
+	/// [`ExpandedKey`]: crate::ln::inbound_payment::ExpandedKey
+	pub fn for_offer_using_derived_keys_with_signer<T: secp256k1::Signing, NS: Deref>(
+		offer: &'a Offer, payment_paths: Vec<BlindedPaymentPath>,
+		message_paths: Vec<BlindedMessagePath>, created_at: Duration, node_signer: &NS,
+		nonce: Nonce, secp_ctx: &Secp256k1<T>,
+	) -> Result<Self, Bolt12SemanticError>
+	where
+		NS::Target: NodeSigner,
+	{
+		if offer.chains().len() > 1 {
+			return Err(Bolt12SemanticError::UnexpectedChain);
+		}
+
+		if payment_paths.is_empty() || message_paths.is_empty() || offer.paths().is_empty() {
+			return Err(Bolt12SemanticError::MissingPaths);
+		}
+
+		let issuer_signing_pubkey =
+			offer.issuer_signing_pubkey().ok_or(Bolt12SemanticError::MissingIssuerSigningPubkey)?;
+
+		let keys = offer
+			.verify_using_recipient_signer(nonce, node_signer, secp_ctx)
 			.map_err(|()| Bolt12SemanticError::InvalidMetadata)?
 			.1
 			.ok_or(Bolt12SemanticError::MissingSigningPubkey)?;

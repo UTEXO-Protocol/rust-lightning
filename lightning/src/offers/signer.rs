@@ -14,6 +14,7 @@ use crate::ln::channelmanager::PaymentId;
 use crate::ln::inbound_payment::{ExpandedKey, IV_LEN};
 use crate::offers::merkle::TlvRecord;
 use crate::offers::nonce::Nonce;
+use crate::sign::NodeSigner;
 use crate::util::ser::Writeable;
 use bitcoin::hashes::cmp::fixed_time_eq;
 use bitcoin::hashes::hmac::{Hmac, HmacEngine};
@@ -21,6 +22,7 @@ use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::{Hash, HashEngine};
 use bitcoin::secp256k1::{self, Keypair, PublicKey, Secp256k1, SecretKey};
 use core::fmt;
+use core::ops::Deref;
 
 use crate::prelude::*;
 
@@ -85,6 +87,21 @@ pub(super) enum Metadata {
 impl Metadata {
 	pub fn payer_data(payment_id: PaymentId, nonce: Nonce, expanded_key: &ExpandedKey) -> Self {
 		let encrypted_payment_id = expanded_key.crypt_for_offer(payment_id.0, nonce);
+
+		let mut bytes = [0u8; PaymentId::LENGTH + Nonce::LENGTH];
+		bytes[..PaymentId::LENGTH].copy_from_slice(encrypted_payment_id.as_slice());
+		bytes[PaymentId::LENGTH..].copy_from_slice(nonce.as_slice());
+
+		Metadata::PayerData(bytes)
+	}
+
+	pub fn payer_data_with_signer<NS: Deref>(
+		payment_id: PaymentId, nonce: Nonce, node_signer: &NS,
+	) -> Self
+	where
+		NS::Target: NodeSigner,
+	{
+		let encrypted_payment_id = node_signer.crypt_for_offer(payment_id.0, nonce);
 
 		let mut bytes = [0u8; PaymentId::LENGTH + Nonce::LENGTH];
 		bytes[..PaymentId::LENGTH].copy_from_slice(encrypted_payment_id.as_slice());
@@ -269,6 +286,18 @@ impl MetadataMaterial {
 		Self { nonce, hmac: expanded_key.hmac_for_offer(), encrypted_payment_id }
 	}
 
+	pub fn new_with_signer<NS: Deref>(
+		nonce: Nonce, node_signer: &NS, payment_id: Option<PaymentId>,
+	) -> Self
+	where
+		NS::Target: NodeSigner,
+	{
+		let encrypted_payment_id =
+			payment_id.map(|payment_id| node_signer.crypt_for_offer(payment_id.0, nonce));
+
+		Self { nonce, hmac: node_signer.hmac_for_offer(), encrypted_payment_id }
+	}
+
 	fn derive_metadata<W: Writeable>(mut self, iv_bytes: &[u8; IV_LEN], tlv_stream: W) -> Vec<u8> {
 		self.hmac.input(iv_bytes);
 		self.hmac.input(&self.nonce.0);
@@ -324,6 +353,20 @@ pub(super) fn derive_keys(nonce: Nonce, expanded_key: &ExpandedKey) -> Keypair {
 	Keypair::from_secret_key(&secp_ctx, &privkey)
 }
 
+pub(super) fn derive_keys_with_signer<NS: Deref>(nonce: Nonce, node_signer: &NS) -> Keypair
+where
+	NS::Target: NodeSigner,
+{
+	const IV_BYTES: &[u8; IV_LEN] = b"LDK Invoice ~~~~";
+	let mut hmac = node_signer.hmac_for_offer();
+	hmac.input(IV_BYTES);
+	hmac.input(&nonce.0);
+
+	let secp_ctx = Secp256k1::new();
+	let privkey = SecretKey::from_slice(Hmac::from_engine(hmac).as_byte_array()).unwrap();
+	Keypair::from_secret_key(&secp_ctx, &privkey)
+}
+
 /// Verifies data given in a TLV stream was used to produce the given metadata, consisting of:
 /// - a 256-bit [`PaymentId`],
 /// - a 128-bit [`Nonce`], and possibly
@@ -363,6 +406,38 @@ pub(super) fn verify_payer_metadata<'a, T: secp256k1::Signing>(
 	Ok(PaymentId(payment_id))
 }
 
+pub(super) fn verify_payer_metadata_with_signer<'a, T: secp256k1::Signing, NS: Deref>(
+	metadata: &[u8], node_signer: &NS, iv_bytes: &[u8; IV_LEN], signing_pubkey: PublicKey,
+	tlv_stream: impl core::iter::Iterator<Item = TlvRecord<'a>>, secp_ctx: &Secp256k1<T>,
+) -> Result<PaymentId, ()>
+where
+	NS::Target: NodeSigner,
+{
+	if metadata.len() < PaymentId::LENGTH {
+		return Err(());
+	}
+
+	let mut encrypted_payment_id = [0u8; PaymentId::LENGTH];
+	encrypted_payment_id.copy_from_slice(&metadata[..PaymentId::LENGTH]);
+
+	let mut hmac =
+		hmac_for_message_with_signer(&metadata[PaymentId::LENGTH..], node_signer, iv_bytes, tlv_stream)?;
+	hmac.input(WITH_ENCRYPTED_PAYMENT_ID_HMAC_INPUT);
+	hmac.input(&encrypted_payment_id);
+
+	verify_metadata(
+		&metadata[PaymentId::LENGTH..],
+		Hmac::from_engine(hmac),
+		signing_pubkey,
+		secp_ctx,
+	)?;
+
+	let nonce = Nonce::try_from(&metadata[PaymentId::LENGTH..][..Nonce::LENGTH]).unwrap();
+	let payment_id = node_signer.crypt_for_offer(encrypted_payment_id, nonce);
+
+	Ok(PaymentId(payment_id))
+}
+
 /// Verifies data given in a TLV stream was used to produce the given metadata, consisting of:
 /// - a 128-bit [`Nonce`] and possibly
 /// - a [`Sha256`] hash of the nonce and the TLV records using the [`ExpandedKey`].
@@ -377,6 +452,23 @@ pub(super) fn verify_recipient_metadata<'a, T: secp256k1::Signing>(
 	secp_ctx: &Secp256k1<T>,
 ) -> Result<Option<Keypair>, ()> {
 	let mut hmac = hmac_for_message(metadata, expanded_key, iv_bytes, tlv_stream)?;
+	hmac.input(WITHOUT_ENCRYPTED_PAYMENT_ID_HMAC_INPUT);
+
+	verify_metadata(metadata, Hmac::from_engine(hmac), signing_pubkey, secp_ctx)
+}
+
+pub(super) fn verify_recipient_metadata_with_signer<
+	'a,
+	T: secp256k1::Signing,
+	NS: Deref,
+>(
+	metadata: &[u8], node_signer: &NS, iv_bytes: &[u8; IV_LEN], signing_pubkey: PublicKey,
+	tlv_stream: impl core::iter::Iterator<Item = TlvRecord<'a>>, secp_ctx: &Secp256k1<T>,
+) -> Result<Option<Keypair>, ()>
+where
+	NS::Target: NodeSigner,
+{
+	let mut hmac = hmac_for_message_with_signer(metadata, node_signer, iv_bytes, tlv_stream)?;
 	hmac.input(WITHOUT_ENCRYPTED_PAYMENT_ID_HMAC_INPUT);
 
 	verify_metadata(metadata, Hmac::from_engine(hmac), signing_pubkey, secp_ctx)
@@ -450,6 +542,39 @@ fn hmac_for_message<'a>(
 	Ok(hmac)
 }
 
+fn hmac_for_message_with_signer<'a, NS: Deref>(
+	metadata: &[u8], node_signer: &NS, iv_bytes: &[u8; IV_LEN],
+	tlv_stream: impl core::iter::Iterator<Item = TlvRecord<'a>>,
+) -> Result<HmacEngine<Sha256>, ()>
+where
+	NS::Target: NodeSigner,
+{
+	let mut hmac = node_signer.hmac_for_offer();
+	hmac.input(iv_bytes);
+
+	let nonce = if metadata.len() < Nonce::LENGTH {
+		if !cfg!(fuzzing) {
+			return Err(());
+		}
+		Nonce::try_from(&[42; Nonce::LENGTH][..]).unwrap()
+	} else {
+		Nonce::try_from(&metadata[..Nonce::LENGTH])?
+	};
+	hmac.input(&nonce.0);
+
+	for record in tlv_stream {
+		hmac.input(record.record_bytes);
+	}
+
+	if metadata.len() == Nonce::LENGTH {
+		hmac.input(DERIVED_METADATA_AND_KEYS_HMAC_INPUT);
+	} else {
+		hmac.input(DERIVED_METADATA_HMAC_INPUT);
+	}
+
+	Ok(hmac)
+}
+
 pub(crate) fn hmac_for_payment_tlvs(
 	receive_tlvs: &UnauthenticatedReceiveTlvs, nonce: Nonce, expanded_key: &ExpandedKey,
 ) -> Hmac<Sha256> {
@@ -463,11 +588,40 @@ pub(crate) fn hmac_for_payment_tlvs(
 	Hmac::from_engine(hmac)
 }
 
+pub(crate) fn hmac_for_payment_tlvs_with_signer<NS: Deref>(
+	receive_tlvs: &UnauthenticatedReceiveTlvs, nonce: Nonce, node_signer: &NS,
+) -> Hmac<Sha256>
+where
+	NS::Target: NodeSigner,
+{
+	const IV_BYTES: &[u8; IV_LEN] = b"LDK Payment TLVs";
+	let mut hmac = node_signer.hmac_for_offer();
+	hmac.input(IV_BYTES);
+	hmac.input(&nonce.0);
+	hmac.input(PAYMENT_TLVS_HMAC_INPUT);
+	receive_tlvs.write(&mut hmac).unwrap();
+
+	Hmac::from_engine(hmac)
+}
+
 pub(crate) fn verify_payment_tlvs(
 	receive_tlvs: &UnauthenticatedReceiveTlvs, hmac: Hmac<Sha256>, nonce: Nonce,
 	expanded_key: &ExpandedKey,
 ) -> Result<(), ()> {
 	if hmac_for_payment_tlvs(receive_tlvs, nonce, expanded_key) == hmac {
+		Ok(())
+	} else {
+		Err(())
+	}
+}
+
+pub(crate) fn verify_payment_tlvs_with_signer<NS: Deref>(
+	receive_tlvs: &UnauthenticatedReceiveTlvs, hmac: Hmac<Sha256>, nonce: Nonce, node_signer: &NS,
+) -> Result<(), ()>
+where
+	NS::Target: NodeSigner,
+{
+	if hmac_for_payment_tlvs_with_signer(receive_tlvs, nonce, node_signer) == hmac {
 		Ok(())
 	} else {
 		Err(())

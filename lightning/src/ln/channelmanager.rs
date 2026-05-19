@@ -89,7 +89,7 @@ use crate::ln::onion_utils::{
 	decode_fulfill_attribution_data, HTLCFailReason, LocalHTLCFailureReason,
 };
 use crate::ln::onion_utils::{process_fulfill_attribution_data, AttributionData};
-use crate::ln::our_peer_storage::{EncryptedOurPeerStorage, PeerStorageMonitorHolder};
+use crate::ln::our_peer_storage::PeerStorageMonitorHolder;
 #[cfg(test)]
 use crate::ln::outbound_payment;
 use crate::ln::outbound_payment::{
@@ -1846,7 +1846,7 @@ pub trait AChannelManager {
 	/// A type implementing [`NodeSigner`].
 	type NodeSigner: NodeSigner + ?Sized;
 	/// A type that may be dereferenced to [`Self::NodeSigner`].
-	type NS: Deref<Target = Self::NodeSigner>;
+	type NS: Deref<Target = Self::NodeSigner> + Clone;
 	/// A type implementing [`EcdsaChannelSigner`].
 	type Signer: EcdsaChannelSigner + Sized;
 	/// A type implementing [`SignerProvider`] for [`Self::Signer`].
@@ -1889,7 +1889,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -2718,7 +2718,7 @@ pub struct ChannelManager<
 	M: Deref,
 	T: Deref,
 	ES: Deref,
-	NS: Deref,
+	NS: Deref + Clone,
 	SP: Deref,
 	F: Deref,
 	R: Deref,
@@ -2743,9 +2743,9 @@ pub struct ChannelManager<
 	router: R,
 
 	#[cfg(test)]
-	pub(super) flow: OffersMessageFlow<MR, L>,
+	pub(super) flow: OffersMessageFlow<NS, MR, L>,
 	#[cfg(not(test))]
-	flow: OffersMessageFlow<MR, L>,
+	flow: OffersMessageFlow<NS, MR, L>,
 
 	/// See `ChannelManager` struct-level documentation for lock order requirements.
 	#[cfg(any(test, feature = "_test_utils"))]
@@ -2835,8 +2835,6 @@ pub struct ChannelManager<
 	short_to_chan_info: FairRwLock<HashMap<u64, (PublicKey, ChannelId)>>,
 
 	our_network_pubkey: PublicKey,
-
-	inbound_payment_key: inbound_payment::ExpandedKey,
 
 	/// LDK puts the [fake scids] that it generates into namespaces, to identify the type of an
 	/// incoming payment. To make it harder for a third-party to identify the type of a payment,
@@ -3962,7 +3960,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -4010,13 +4008,12 @@ where
 		let mut secp_ctx = Secp256k1::new();
 		secp_ctx.seeded_randomize(&entropy_source.get_secure_random_bytes());
 
-		let expanded_inbound_key = node_signer.get_expanded_key();
 		let our_network_pubkey = node_signer.get_node_id(Recipient::Node).unwrap();
 
 		let flow = OffersMessageFlow::new(
 			ChainHash::using_genesis_block(params.network), params.best_block,
-			our_network_pubkey, current_timestamp, expanded_inbound_key,
-			node_signer.get_receive_auth_key(), secp_ctx.clone(), message_router, logger.clone(),
+			our_network_pubkey, current_timestamp,
+			node_signer.clone(), secp_ctx.clone(), message_router, logger.clone(),
 		);
 
 		ChannelManager {
@@ -4040,8 +4037,6 @@ where
 
 			our_network_pubkey,
 			secp_ctx,
-
-			inbound_payment_key: expanded_inbound_key,
 			fake_scid_rand_bytes: entropy_source.get_secure_random_bytes(),
 
 			probing_cookie_secret: entropy_source.get_secure_random_bytes(),
@@ -5784,15 +5779,13 @@ where
 		&self, invoice: &Bolt12Invoice, context: Option<&OffersContext>,
 	) -> Result<PaymentId, ()> {
 		let secp_ctx = &self.secp_ctx;
-		let expanded_key = &self.inbound_payment_key;
 
 		match context {
-			None if invoice.is_for_refund_without_paths() => {
-				invoice.verify_using_metadata(expanded_key, secp_ctx)
-			},
-			Some(&OffersContext::OutboundPayment { payment_id, nonce, .. }) => {
-				invoice.verify_using_payer_data(payment_id, nonce, expanded_key, secp_ctx)
-			},
+			None if invoice.is_for_refund_without_paths() =>
+				self.node_signer.verify_bolt12_invoice_using_metadata(invoice, secp_ctx),
+			Some(&OffersContext::OutboundPayment { payment_id, nonce, .. }) =>
+				self.node_signer
+					.verify_bolt12_invoice_using_payer_data(invoice, payment_id, nonce, secp_ctx),
 			_ => Err(()),
 		}
 	}
@@ -5827,6 +5820,7 @@ where
 		let entropy = &*self.entropy_source;
 		let router = &*self.router;
 		let refresh_res = self.flow.check_refresh_async_receive_offer_cache(
+			&self.node_signer,
 			peers,
 			channels,
 			entropy,
@@ -8164,12 +8158,10 @@ where
 					// associated with the same payment_hash pending or not.
 					let payment_preimage = if has_recipient_created_payment_secret {
 						if let Some(ref payment_data) = payment_data {
-							let verify_res = inbound_payment::verify(
+							let verify_res = self.node_signer.verify_inbound_payment(
 								payment_hash,
 								&payment_data,
 								self.highest_seen_timestamp.load(Ordering::Acquire) as u64,
-								&self.inbound_payment_key,
-								&self.logger,
 							);
 							let (payment_preimage, min_final_cltv_expiry_delta) = match verify_res {
 								Ok(result) => result,
@@ -8229,9 +8221,9 @@ where
 
 								let verify_opt = invoice_request_opt.and_then(|invreq| {
 									invreq
-										.verify_using_recipient_data(
+										.verify_using_recipient_data_with_signer(
 											offer_nonce,
-											&self.inbound_payment_key,
+											&self.node_signer,
 											&self.secp_ctx,
 										)
 										.ok()
@@ -10707,16 +10699,8 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			)
 		};
 
-		let encrypted_ops = match EncryptedOurPeerStorage::new(msg.data) {
-			Ok(encrypted_ops) => encrypted_ops,
-			Err(()) => {
-				log_debug!(logger, "Received a peer backup which wasn't long enough to be valid");
-				return Err(err());
-			},
-		};
-
-		let decrypted = match encrypted_ops.decrypt(&self.node_signer.get_peer_storage_key()) {
-			Ok(decrypted_ops) => decrypted_ops.into_vec(),
+		let decrypted = match self.node_signer.decrypt_peer_storage_payload(msg.data) {
+			Ok(decrypted_ops) => decrypted_ops,
 			Err(()) => {
 				log_debug!(logger, "Received a peer backup which was corrupted");
 				return Err(err());
@@ -13058,6 +13042,7 @@ macro_rules! create_offer_builder { ($self: ident, $builder: ty) => {
 	/// [`InvoiceRequest`]: crate::offers::invoice_request::InvoiceRequest
 	pub fn create_offer_builder(&$self) -> Result<$builder, Bolt12SemanticError> {
 		let builder = $self.flow.create_offer_builder(
+			&$self.node_signer,
 			&*$self.entropy_source, $self.get_peers_for_blinded_path()
 		)?;
 
@@ -13083,7 +13068,7 @@ macro_rules! create_offer_builder { ($self: ident, $builder: ty) => {
 		ME::Target: MessageRouter,
 	{
 		let builder = $self.flow.create_offer_builder_using_router(
-			router, &*$self.entropy_source, $self.get_peers_for_blinded_path()
+			&$self.node_signer, router, &*$self.entropy_source, $self.get_peers_for_blinded_path()
 		)?;
 
 		Ok(builder.into())
@@ -13138,6 +13123,7 @@ macro_rules! create_refund_builder { ($self: ident, $builder: ty) => {
 		let entropy = &*$self.entropy_source;
 
 		let builder = $self.flow.create_refund_builder(
+			&$self.node_signer,
 			entropy, amount_msats, absolute_expiry,
 			payment_id, $self.get_peers_for_blinded_path()
 		)?;
@@ -13182,7 +13168,7 @@ macro_rules! create_refund_builder { ($self: ident, $builder: ty) => {
 		let entropy = &*$self.entropy_source;
 
 		let builder = $self.flow.create_refund_builder_using_router(
-			router, entropy, amount_msats, absolute_expiry,
+			&$self.node_signer, router, entropy, amount_msats, absolute_expiry,
 			payment_id, $self.get_peers_for_blinded_path()
 		)?;
 
@@ -13203,7 +13189,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -13422,6 +13408,7 @@ where
 		let nonce = Nonce::from_entropy_source(entropy);
 
 		let builder = self.flow.create_invoice_request_builder(
+			&self.node_signer,
 			offer, nonce, payment_id,
 		)?;
 
@@ -13497,6 +13484,7 @@ where
 			Ok((payment_hash, payment_secret)) => {
 				let entropy = &*self.entropy_source;
 				let builder = self.flow.create_invoice_builder_from_refund(
+					&self.node_signer,
 					&self.router, entropy, refund, payment_hash,
 					payment_secret, self.list_usable_channels()
 				)?;
@@ -13611,11 +13599,10 @@ where
 		&self, min_value_msat: Option<u64>, invoice_expiry_delta_secs: u32,
 		min_final_cltv_expiry_delta: Option<u16>,
 	) -> Result<(PaymentHash, PaymentSecret), ()> {
-		inbound_payment::create(
-			&self.inbound_payment_key,
+		self.node_signer.create_inbound_payment(
 			min_value_msat,
 			invoice_expiry_delta_secs,
-			&self.entropy_source,
+			self.entropy_source.get_secure_random_bytes(),
 			self.highest_seen_timestamp.load(Ordering::Acquire) as u64,
 			min_final_cltv_expiry_delta,
 		)
@@ -13671,10 +13658,9 @@ where
 		&self, payment_hash: PaymentHash, min_value_msat: Option<u64>,
 		invoice_expiry_delta_secs: u32, min_final_cltv_expiry: Option<u16>,
 	) -> Result<PaymentSecret, ()> {
-		inbound_payment::create_from_hash(
-			&self.inbound_payment_key,
-			min_value_msat,
+		self.node_signer.create_inbound_payment_for_hash(
 			payment_hash,
+			min_value_msat,
 			invoice_expiry_delta_secs,
 			self.highest_seen_timestamp.load(Ordering::Acquire) as u64,
 			min_final_cltv_expiry,
@@ -13688,8 +13674,7 @@ where
 	pub fn get_payment_preimage(
 		&self, payment_hash: PaymentHash, payment_secret: PaymentSecret,
 	) -> Result<PaymentPreimage, APIError> {
-		let expanded_key = &self.inbound_payment_key;
-		inbound_payment::get_payment_preimage(payment_hash, payment_secret, expanded_key)
+		self.node_signer.get_payment_preimage(payment_hash, payment_secret)
 	}
 
 	/// [`BlindedMessagePath`]s for an async recipient to communicate with this node and interactively
@@ -13765,6 +13750,7 @@ where
 		let entropy = &*self.entropy_source;
 
 		self.flow.test_create_blinded_payment_paths(
+			&self.node_signer,
 			&self.router,
 			entropy,
 			self.list_usable_channels(),
@@ -14072,7 +14058,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -14413,7 +14399,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -14448,7 +14434,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -14509,7 +14495,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -14682,7 +14668,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -15010,7 +14996,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -15585,7 +15571,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -15648,7 +15634,7 @@ where
 					None => return None,
 				};
 
-				let invoice_request = match self.flow.verify_invoice_request(invoice_request, context) {
+				let invoice_request = match self.flow.verify_invoice_request(&self.node_signer, invoice_request, context) {
 					Ok(InvreqResponseInstructions::SendInvoice(invoice_request)) => invoice_request,
 					Ok(InvreqResponseInstructions::SendStaticInvoice { recipient_id, invoice_slot, invoice_request }) => {
 						self.pending_events.lock().unwrap().push_back((Event::StaticInvoiceRequested {
@@ -15690,7 +15676,7 @@ where
 				}
 			},
 			OffersMessage::Invoice(invoice) => {
-				let payment_id = match self.flow.verify_bolt12_invoice(&invoice, context.as_ref()) {
+				let payment_id = match self.flow.verify_bolt12_invoice(&self.node_signer, &invoice, context.as_ref()) {
 					Ok(payment_id) => payment_id,
 					Err(()) => return None,
 				};
@@ -15755,7 +15741,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -15794,6 +15780,7 @@ where
 			None => return None,
 		};
 		let (serve_static_invoice, reply_context) = match self.flow.handle_offer_paths(
+			&self.node_signer,
 			message,
 			context,
 			responder.clone(),
@@ -15957,7 +15944,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -16025,7 +16012,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -16543,7 +16530,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -16910,7 +16897,7 @@ pub struct ChannelManagerReadArgs<
 	M: Deref,
 	T: Deref,
 	ES: Deref,
-	NS: Deref,
+	NS: Deref + Clone,
 	SP: Deref,
 	F: Deref,
 	R: Deref,
@@ -16996,7 +16983,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -17052,7 +17039,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -17085,7 +17072,7 @@ impl<
 		M: Deref,
 		T: Deref,
 		ES: Deref,
-		NS: Deref,
+		NS: Deref + Clone,
 		SP: Deref,
 		F: Deref,
 		R: Deref,
@@ -18189,8 +18176,6 @@ where
 			}
 		}
 
-		let expanded_inbound_key = args.node_signer.get_expanded_key();
-
 		let mut claimable_payments = hash_map_with_capacity(claimable_htlcs_list.len());
 		if let Some(purposes) = claimable_htlc_purposes {
 			if purposes.len() != claimable_htlcs_list.len() {
@@ -18232,12 +18217,10 @@ where
 					OnionPayload::Invoice { _legacy_hop_data } => {
 						if let Some(hop_data) = _legacy_hop_data {
 							events::PaymentPurpose::Bolt11InvoicePayment {
-								payment_preimage: match inbound_payment::verify(
+								payment_preimage: match args.node_signer.verify_inbound_payment(
 									payment_hash,
 									&hop_data,
 									0,
-									&expanded_inbound_key,
-									&args.logger,
 								) {
 									Ok((payment_preimage, _)) => payment_preimage,
 									Err(()) => {
@@ -18445,8 +18428,7 @@ where
 			best_block,
 			our_network_pubkey,
 			highest_seen_timestamp,
-			expanded_inbound_key,
-			args.node_signer.get_receive_auth_key(),
+			args.node_signer.clone(),
 			secp_ctx.clone(),
 			args.message_router,
 			args.logger.clone(),
@@ -18462,8 +18444,6 @@ where
 			flow,
 
 			best_block: RwLock::new(best_block),
-
-			inbound_payment_key: expanded_inbound_key,
 			pending_outbound_payments: pending_outbounds,
 			pending_intercepted_htlcs: Mutex::new(pending_intercepted_htlcs.unwrap()),
 
@@ -19417,7 +19397,7 @@ mod tests {
 		// payment verification fails as expected.
 		let mut bad_payment_hash = payment_hash.clone();
 		bad_payment_hash.0[0] += 1;
-		match inbound_payment::verify(bad_payment_hash, &payment_data, nodes[0].node.highest_seen_timestamp.load(Ordering::Acquire) as u64, &nodes[0].node.inbound_payment_key, &nodes[0].logger) {
+		match inbound_payment::verify(bad_payment_hash, &payment_data, nodes[0].node.highest_seen_timestamp.load(Ordering::Acquire) as u64, &nodes[0].keys_manager.get_expanded_key(), &nodes[0].logger) {
 			Ok(_) => panic!("Unexpected ok"),
 			Err(()) => {
 				nodes[0].logger.assert_log_contains("lightning::ln::inbound_payment", "Failing HTLC with user-generated payment_hash", 1);
@@ -19425,7 +19405,7 @@ mod tests {
 		}
 
 		// Check that using the original payment hash succeeds.
-		assert!(inbound_payment::verify(payment_hash, &payment_data, nodes[0].node.highest_seen_timestamp.load(Ordering::Acquire) as u64, &nodes[0].node.inbound_payment_key, &nodes[0].logger).is_ok());
+		assert!(inbound_payment::verify(payment_hash, &payment_data, nodes[0].node.highest_seen_timestamp.load(Ordering::Acquire) as u64, &nodes[0].keys_manager.get_expanded_key(), &nodes[0].logger).is_ok());
 	}
 
 	fn check_not_connected_to_peer_error<T>(

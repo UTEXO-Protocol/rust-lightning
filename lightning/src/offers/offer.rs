@@ -93,12 +93,14 @@ use crate::util::ser::{
 	CursorReadable, HighZeroBytesDroppedBigSize, LengthLimitedRead, LengthReadable, Readable,
 	WithoutLength, Writeable, Writer,
 };
+use crate::sign::NodeSigner;
 use bitcoin::constants::ChainHash;
 use bitcoin::network::Network;
 use bitcoin::secp256k1::{self, Keypair, PublicKey, Secp256k1};
 use core::borrow::Borrow;
 use core::hash::{Hash, Hasher};
 use core::num::NonZeroU64;
+use core::ops::Deref;
 use core::str::FromStr;
 use core::time::Duration;
 
@@ -288,6 +290,37 @@ macro_rules! offer_derived_metadata_builder_methods {
 			secp_ctx: &'a Secp256k1<$secp_context>,
 		) -> Self {
 			let derivation_material = MetadataMaterial::new(nonce, expanded_key, None);
+			let metadata = Metadata::DerivedSigningPubkey(derivation_material);
+			Self {
+				offer: OfferContents {
+					chains: None,
+					metadata: Some(metadata),
+					amount: None,
+					description: None,
+					features: OfferFeatures::empty(),
+					absolute_expiry: None,
+					issuer: None,
+					paths: None,
+					supported_quantity: Quantity::One,
+					issuer_signing_pubkey: Some(node_id),
+					#[cfg(test)]
+					experimental_foo: None,
+				},
+				metadata_strategy: core::marker::PhantomData,
+				secp_ctx: Some(secp_ctx),
+			}
+		}
+
+		/// Similar to [`OfferBuilder::deriving_signing_pubkey`] but derives recipient metadata using
+		/// signer-owned inbound payment material.
+		pub fn deriving_signing_pubkey_with_signer<NS: Deref>(
+			node_id: PublicKey, node_signer: &NS, nonce: Nonce,
+			secp_ctx: &'a Secp256k1<$secp_context>,
+		) -> Self
+		where
+			NS::Target: NodeSigner,
+		{
+			let derivation_material = MetadataMaterial::new_with_signer(nonce, node_signer, None);
 			let metadata = Metadata::DerivedSigningPubkey(derivation_material);
 			Self {
 				offer: OfferContents {
@@ -763,6 +796,16 @@ impl Offer {
 	) -> Result<(OfferId, Option<Keypair>), ()> {
 		self.contents.verify_using_recipient_data(&self.bytes, nonce, key, secp_ctx)
 	}
+
+	#[allow(dead_code)]
+	pub(super) fn verify_using_recipient_signer<T: secp256k1::Signing, NS: Deref>(
+		&self, nonce: Nonce, node_signer: &NS, secp_ctx: &Secp256k1<T>,
+	) -> Result<(OfferId, Option<Keypair>), ()>
+	where
+		NS::Target: NodeSigner,
+	{
+		self.contents.verify_using_recipient_data_with_signer(&self.bytes, nonce, node_signer, secp_ctx)
+	}
 }
 
 macro_rules! request_invoice_derived_signing_pubkey { ($self: ident, $offer: expr, $builder: ty, $hrn: expr) => {
@@ -799,6 +842,51 @@ macro_rules! request_invoice_derived_signing_pubkey { ($self: ident, $offer: exp
 		}
 
 		let mut builder = <$builder>::deriving_signing_pubkey(&$offer, expanded_key, nonce, secp_ctx, payment_id);
+		if let Some(hrn) = $hrn {
+			#[cfg(c_bindings)]
+			{
+				builder.sourced_from_human_readable_name(hrn);
+			}
+			#[cfg(not(c_bindings))]
+			{
+				builder = builder.sourced_from_human_readable_name(hrn);
+			}
+		}
+		Ok(builder)
+	}
+
+	/// Similar to [`Offer::request_invoice`] but derives payer metadata using signer-owned inbound
+	/// payment material instead of requiring direct access to an [`ExpandedKey`].
+	///
+	/// Errors if the offer contains unknown required features.
+	///
+	/// [`ExpandedKey`]: crate::ln::inbound_payment::ExpandedKey
+	pub fn request_invoice_with_signer<
+		'a, 'b, NS: Deref,
+		#[cfg(not(c_bindings))]
+		T: secp256k1::Signing
+	>(
+		&'a $self, node_signer: &NS, nonce: Nonce,
+		#[cfg(not(c_bindings))]
+		secp_ctx: &'b Secp256k1<T>,
+		#[cfg(c_bindings)]
+		secp_ctx: &'b Secp256k1<secp256k1::All>,
+		payment_id: PaymentId
+	) -> Result<$builder, Bolt12SemanticError>
+	where
+		NS::Target: NodeSigner,
+	{
+		if $offer.offer_features().requires_unknown_bits() {
+			return Err(Bolt12SemanticError::UnknownRequiredFeatures);
+		}
+
+		let mut builder = <$builder>::deriving_signing_pubkey_with_signer(
+			&$offer,
+			node_signer,
+			nonce,
+			secp_ctx,
+			payment_id,
+		);
 		if let Some(hrn) = $hrn {
 			#[cfg(c_bindings)]
 			{
@@ -999,11 +1087,30 @@ impl OfferContents {
 		self.verify(bytes, self.metadata.as_ref(), key, IV_BYTES_WITH_METADATA, secp_ctx)
 	}
 
+	pub(super) fn verify_using_metadata_with_signer<T: secp256k1::Signing, NS: Deref>(
+		&self, bytes: &[u8], node_signer: &NS, secp_ctx: &Secp256k1<T>,
+	) -> Result<(OfferId, Option<Keypair>), ()>
+	where
+		NS::Target: NodeSigner,
+	{
+		self.verify_with_signer(bytes, self.metadata.as_ref(), node_signer, IV_BYTES_WITH_METADATA, secp_ctx)
+	}
+
 	pub(super) fn verify_using_recipient_data<T: secp256k1::Signing>(
 		&self, bytes: &[u8], nonce: Nonce, key: &ExpandedKey, secp_ctx: &Secp256k1<T>,
 	) -> Result<(OfferId, Option<Keypair>), ()> {
 		let metadata = Metadata::RecipientData(nonce);
 		self.verify(bytes, Some(&metadata), key, IV_BYTES_WITHOUT_METADATA, secp_ctx)
+	}
+
+	pub(super) fn verify_using_recipient_data_with_signer<T: secp256k1::Signing, NS: Deref>(
+		&self, bytes: &[u8], nonce: Nonce, node_signer: &NS, secp_ctx: &Secp256k1<T>,
+	) -> Result<(OfferId, Option<Keypair>), ()>
+	where
+		NS::Target: NodeSigner,
+	{
+		let metadata = Metadata::RecipientData(nonce);
+		self.verify_with_signer(bytes, Some(&metadata), node_signer, IV_BYTES_WITHOUT_METADATA, secp_ctx)
 	}
 
 	/// Verifies that the offer metadata was produced from the offer in the TLV stream.
@@ -1029,6 +1136,45 @@ impl OfferContents {
 				let keys = signer::verify_recipient_metadata(
 					metadata.as_ref(),
 					key,
+					iv_bytes,
+					signing_pubkey,
+					tlv_stream,
+					secp_ctx,
+				)?;
+
+				let offer_id = OfferId::from_valid_bolt12_tlv_stream(bytes);
+
+				Ok((offer_id, keys))
+			},
+			None => Err(()),
+		}
+	}
+
+	fn verify_with_signer<T: secp256k1::Signing, NS: Deref>(
+		&self, bytes: &[u8], metadata: Option<&Metadata>, node_signer: &NS,
+		iv_bytes: &[u8; IV_LEN], secp_ctx: &Secp256k1<T>,
+	) -> Result<(OfferId, Option<Keypair>), ()>
+	where
+		NS::Target: NodeSigner,
+	{
+		match metadata {
+			Some(metadata) => {
+				let tlv_stream = TlvStream::new(bytes)
+					.range(OFFER_TYPES)
+					.filter(|record| match record.r#type {
+						OFFER_METADATA_TYPE => false,
+						OFFER_ISSUER_ID_TYPE => !metadata.derives_recipient_keys(),
+						_ => true,
+					})
+					.chain(TlvStream::new(bytes).range(EXPERIMENTAL_OFFER_TYPES));
+
+				let signing_pubkey = match self.issuer_signing_pubkey() {
+					Some(signing_pubkey) => signing_pubkey,
+					None => return Err(()),
+				};
+				let keys = signer::verify_recipient_metadata_with_signer(
+					metadata.as_ref(),
+					node_signer,
 					iv_bytes,
 					signing_pubkey,
 					tlv_stream,

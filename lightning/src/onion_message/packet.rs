@@ -19,19 +19,20 @@ use super::offers::OffersMessage;
 use crate::blinded_path::message::{
 	BlindedMessagePath, DummyTlv, ForwardTlvs, NextMessageHop, ReceiveTlvs,
 };
-use crate::crypto::streams::{ChaChaDualPolyReadAdapter, ChaChaPolyWriteAdapter};
+use crate::crypto::streams::ChaChaPolyWriteAdapter;
 use crate::ln::msgs::DecodeError;
 use crate::ln::onion_utils;
-use crate::sign::ReceiveAuthKey;
+use crate::sign::NodeSigner;
 use crate::util::logger::Logger;
 use crate::util::ser::{
-	BigSize, FixedLengthReader, LengthLimitedRead, LengthReadable, LengthReadableArgs, Readable,
+	BigSize, FixedLengthReader, LengthLimitedRead, LengthReadable, Readable,
 	ReadableArgs, Writeable, Writer,
 };
 
 use crate::io::{self, Read};
 use crate::prelude::*;
 use core::cmp;
+use core::ops::Deref;
 use core::fmt;
 
 // Per the spec, an onion message packet's `hop_data` field length should be
@@ -268,25 +269,27 @@ impl<T: OnionMessageContents> Writeable for (Payload<T>, [u8; 32]) {
 }
 
 // Uses the provided secret to simultaneously decode and decrypt the control TLVs and data TLV.
-impl<H: CustomOnionMessageHandler + ?Sized, L: Logger + ?Sized>
-	ReadableArgs<(SharedSecret, &H, ReceiveAuthKey, &L)>
+impl<H: CustomOnionMessageHandler + ?Sized, L: Logger + ?Sized, NS: Deref>
+	ReadableArgs<(SharedSecret, &H, &NS, &L)>
 	for Payload<ParsedOnionMessageContents<<H as CustomOnionMessageHandler>::CustomMessage>>
+where
+	NS::Target: NodeSigner,
 {
 	fn read<R: Read>(
-		r: &mut R, args: (SharedSecret, &H, ReceiveAuthKey, &L),
+		r: &mut R, args: (SharedSecret, &H, &NS, &L),
 	) -> Result<Self, DecodeError> {
-		let (encrypted_tlvs_ss, handler, receive_tlvs_key, logger) = args;
+		let (encrypted_tlvs_ss, handler, node_signer, logger) = args;
 
 		let v: BigSize = Readable::read(r)?;
 		let mut rd = FixedLengthReader::new(r, v.0);
 		let mut reply_path: Option<BlindedMessagePath> = None;
-		let mut read_adapter: Option<ChaChaDualPolyReadAdapter<ControlTlvs>> = None;
+		let mut encrypted_control_tlvs: Option<Vec<u8>> = None;
 		let rho = onion_utils::gen_rho_from_shared_secret(&encrypted_tlvs_ss.secret_bytes());
 		let mut message_type: Option<u64> = None;
 		let mut message = None;
 		decode_tlv_stream_with_custom_tlv_decode!(&mut rd, {
 			(2, reply_path, option),
-			(4, read_adapter, (option: LengthReadableArgs, (rho, receive_tlvs_key.0))),
+			(4, encrypted_control_tlvs, option),
 		}, |msg_type, msg_reader| {
 			if msg_type < 64 { return Ok(false) }
 			// Don't allow reading more than one data TLV from an onion message.
@@ -320,18 +323,22 @@ impl<H: CustomOnionMessageHandler + ?Sized, L: Logger + ?Sized>
 		});
 		rd.eat_remaining().map_err(|_| DecodeError::ShortRead)?;
 
-		match read_adapter {
-			None => return Err(DecodeError::InvalidValue),
-			Some(ChaChaDualPolyReadAdapter { readable: ControlTlvs::Forward(tlvs), used_aad }) => {
+		let encrypted_control_tlvs = encrypted_control_tlvs.ok_or(DecodeError::InvalidValue)?;
+		let (plaintext_control_tlvs, used_aad) =
+			node_signer.decrypt_blinded_message_payload(&encrypted_control_tlvs, rho)?;
+		let mut cursor = io::Cursor::new(plaintext_control_tlvs);
+		let control_tlvs = ControlTlvs::read(&mut cursor)?;
+		match control_tlvs {
+			ControlTlvs::Forward(tlvs) => {
 				if used_aad || message_type.is_some() {
 					return Err(DecodeError::InvalidValue);
 				}
 				Ok(Payload::Forward(ForwardControlTlvs::Unblinded(tlvs)))
 			},
-			Some(ChaChaDualPolyReadAdapter { readable: ControlTlvs::Dummy, used_aad }) => {
+			ControlTlvs::Dummy => {
 				Ok(Payload::Dummy { control_tlvs_authenticated: used_aad })
 			},
-			Some(ChaChaDualPolyReadAdapter { readable: ControlTlvs::Receive(tlvs), used_aad }) => {
+			ControlTlvs::Receive(tlvs) => {
 				Ok(Payload::Receive {
 					control_tlvs: ReceiveControlTlvs::Unblinded(tlvs),
 					reply_path,

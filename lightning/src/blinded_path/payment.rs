@@ -27,6 +27,7 @@ use crate::ln::onion_utils;
 use crate::offers::invoice_request::InvoiceRequestFields;
 use crate::offers::nonce::Nonce;
 use crate::offers::offer::OfferId;
+use crate::offers::signer;
 use crate::routing::gossip::{NodeId, ReadOnlyNetworkGraph};
 use crate::sign::{EntropySource, NodeSigner, Recipient};
 use crate::types::features::BlindedHopFeatures;
@@ -362,6 +363,29 @@ impl UnauthenticatedReceiveTlvs {
 			tlvs: self,
 		}
 	}
+
+	/// Creates authenticated [`ReceiveTlvs`] using signer-owned inbound payment material.
+	pub fn authenticate_with_signer<NS: Deref>(
+		self, nonce: Nonce, node_signer: &NS,
+	) -> ReceiveTlvs
+	where
+		NS::Target: NodeSigner,
+	{
+		ReceiveTlvs {
+			authentication: (signer::hmac_for_payment_tlvs_with_signer(&self, nonce, node_signer), nonce),
+			tlvs: self,
+		}
+	}
+
+	/// Verifies offer-payment authentication using signer-owned inbound payment material.
+	pub fn verify_for_offer_payment_with_signer<NS: Deref>(
+		&self, hmac: Hmac<Sha256>, nonce: Nonce, node_signer: &NS,
+	) -> Result<(), ()>
+	where
+		NS::Target: NodeSigner,
+	{
+		signer::verify_payment_tlvs_with_signer(self, hmac, nonce, node_signer)
+	}
 }
 
 /// Data to construct a [`BlindedHop`] for sending a payment over.
@@ -664,8 +688,8 @@ pub(super) fn blinded_hops<T: secp256k1::Signing + secp256k1::Verification>(
 ) -> Vec<BlindedHop> {
 	let pks = intermediate_nodes
 		.iter()
-		.map(|node| (node.node_id, None))
-		.chain(core::iter::once((payee_node_id, None)));
+		.map(|node| node.node_id)
+		.chain(core::iter::once(payee_node_id));
 	let tlvs = intermediate_nodes
 		.iter()
 		.map(|node| BlindedPaymentTlvsRef::Forward(&node.tlvs))
