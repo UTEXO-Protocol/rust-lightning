@@ -145,6 +145,7 @@ use crate::offers::refund::{
 	IV_BYTES_WITH_METADATA as REFUND_IV_BYTES_WITH_METADATA,
 };
 use crate::offers::signer::{self, Metadata};
+use crate::sign::NodeSigner;
 use crate::types::features::{Bolt12InvoiceFeatures, InvoiceRequestFeatures, OfferFeatures};
 use crate::types::payment::PaymentHash;
 use crate::types::string::PrintableString;
@@ -1001,6 +1002,30 @@ impl Bolt12Invoice {
 		self.contents.verify(&self.bytes, metadata, key, iv_bytes, secp_ctx)
 	}
 
+	/// Similar to [`Bolt12Invoice::verify_using_metadata`] but verifies the invoice using
+	/// signer-owned inbound payment material instead of requiring direct access to an
+	/// [`ExpandedKey`].
+	///
+	/// Returns the associated [`PaymentId`] to use when sending the payment.
+	///
+	/// [`ExpandedKey`]: crate::ln::inbound_payment::ExpandedKey
+	pub fn verify_using_metadata_with_signer<T: secp256k1::Signing, NS: core::ops::Deref>(
+		&self, node_signer: &NS, secp_ctx: &Secp256k1<T>,
+	) -> Result<PaymentId, ()>
+	where
+		NS::Target: NodeSigner,
+	{
+		let (metadata, iv_bytes) = match &self.contents {
+			InvoiceContents::ForOffer { invoice_request, .. } => {
+				(&invoice_request.inner.payer.0, INVOICE_REQUEST_IV_BYTES)
+			},
+			InvoiceContents::ForRefund { refund, .. } => {
+				(&refund.payer.0, REFUND_IV_BYTES_WITH_METADATA)
+			},
+		};
+		self.contents.verify_with_signer(&self.bytes, metadata, node_signer, iv_bytes, secp_ctx)
+	}
+
 	/// Verifies that the invoice was for a request or refund created using the given key by
 	/// checking a payment id and nonce included with the [`BlindedMessagePath`] for which the invoice was
 	/// sent through.
@@ -1013,6 +1038,34 @@ impl Bolt12Invoice {
 			InvoiceContents::ForRefund { .. } => REFUND_IV_BYTES_WITHOUT_METADATA,
 		};
 		self.contents.verify(&self.bytes, &metadata, key, iv_bytes, secp_ctx).and_then(
+			|extracted_payment_id| {
+				(payment_id == extracted_payment_id).then(|| payment_id).ok_or(())
+			},
+		)
+	}
+
+	/// Similar to [`Bolt12Invoice::verify_using_payer_data`] but verifies the invoice using
+	/// signer-owned inbound payment material instead of requiring direct access to an
+	/// [`ExpandedKey`].
+	///
+	/// Returns the associated [`PaymentId`] to use when sending the payment.
+	///
+	/// [`ExpandedKey`]: crate::ln::inbound_payment::ExpandedKey
+	pub fn verify_using_payer_data_with_signer<
+		T: secp256k1::Signing,
+		NS: core::ops::Deref,
+	>(
+		&self, payment_id: PaymentId, nonce: Nonce, node_signer: &NS, secp_ctx: &Secp256k1<T>,
+	) -> Result<PaymentId, ()>
+	where
+		NS::Target: NodeSigner,
+	{
+		let metadata = Metadata::payer_data_with_signer(payment_id, nonce, node_signer);
+		let iv_bytes = match &self.contents {
+			InvoiceContents::ForOffer { .. } => INVOICE_REQUEST_IV_BYTES,
+			InvoiceContents::ForRefund { .. } => REFUND_IV_BYTES_WITHOUT_METADATA,
+		};
+		self.contents.verify_with_signer(&self.bytes, &metadata, node_signer, iv_bytes, secp_ctx).and_then(
 			|extracted_payment_id| {
 				(payment_id == extracted_payment_id).then(|| payment_id).ok_or(())
 			},
@@ -1308,6 +1361,38 @@ impl InvoiceContents {
 		signer::verify_payer_metadata(
 			metadata.as_ref(),
 			key,
+			iv_bytes,
+			signing_pubkey,
+			tlv_stream,
+			secp_ctx,
+		)
+	}
+
+	fn verify_with_signer<T: secp256k1::Signing, NS: core::ops::Deref>(
+		&self, bytes: &[u8], metadata: &Metadata, node_signer: &NS, iv_bytes: &[u8; IV_LEN],
+		secp_ctx: &Secp256k1<T>,
+	) -> Result<PaymentId, ()>
+	where
+		NS::Target: NodeSigner,
+	{
+		const EXPERIMENTAL_TYPES: core::ops::Range<u64> =
+			EXPERIMENTAL_OFFER_TYPES.start..EXPERIMENTAL_INVOICE_REQUEST_TYPES.end;
+
+		let offer_records = TlvStream::new(bytes).range(OFFER_TYPES);
+		let invreq_records = TlvStream::new(bytes).range(INVOICE_REQUEST_TYPES).filter(|record| {
+			match record.r#type {
+				PAYER_METADATA_TYPE => false,
+				INVOICE_REQUEST_PAYER_ID_TYPE => !metadata.derives_payer_keys(),
+				_ => true,
+			}
+		});
+		let experimental_records = TlvStream::new(bytes).range(EXPERIMENTAL_TYPES);
+		let tlv_stream = offer_records.chain(invreq_records).chain(experimental_records);
+
+		let signing_pubkey = self.payer_signing_pubkey();
+		signer::verify_payer_metadata_with_signer(
+			metadata.as_ref(),
+			node_signer,
 			iv_bytes,
 			signing_pubkey,
 			tlv_stream,

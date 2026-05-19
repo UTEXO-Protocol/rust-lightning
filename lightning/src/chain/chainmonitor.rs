@@ -66,6 +66,8 @@ use core::iter::Cycle;
 use core::ops::Deref;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+type PeerStorageEncryptor = Arc<dyn Fn(Vec<u8>, [u8; 32]) -> Vec<u8> + Send + Sync>;
+
 /// `Persist` defines behavior for persisting channel monitors: this could mean
 /// writing once to disk, and/or uploading to one or more backup services.
 ///
@@ -396,7 +398,7 @@ pub struct ChainMonitor<
 	pending_send_only_events: Mutex<Vec<MessageSendEvent>>,
 
 	#[cfg(peer_storage)]
-	our_peerstorage_encryption_key: PeerStorageKey,
+	our_peerstorage_encryptor: PeerStorageEncryptor,
 }
 
 impl<
@@ -441,6 +443,15 @@ where
 		persister: MonitorUpdatingPersisterAsync<K, S, L, ES, SP, T, F>, _entropy_source: ES,
 		_our_peerstorage_encryption_key: PeerStorageKey,
 	) -> Self {
+		#[cfg(peer_storage)]
+		let our_peerstorage_encryptor: PeerStorageEncryptor = Arc::new({
+			let key = _our_peerstorage_encryption_key.clone();
+			move |plaintext: Vec<u8>, random_bytes: [u8; 32]| {
+				DecryptedOurPeerStorage::new(plaintext)
+					.encrypt(&key, &random_bytes)
+					.into_vec()
+			}
+		});
 		let event_notifier = Arc::new(Notifier::new());
 		Self {
 			monitors: RwLock::new(new_hash_map()),
@@ -455,7 +466,7 @@ where
 			persister: AsyncPersister { persister, event_notifier },
 			pending_send_only_events: Mutex::new(Vec::new()),
 			#[cfg(peer_storage)]
-			our_peerstorage_encryption_key: _our_peerstorage_encryption_key,
+			our_peerstorage_encryptor,
 		}
 	}
 }
@@ -658,6 +669,15 @@ where
 		chain_source: Option<C>, broadcaster: T, logger: L, feeest: F, persister: P,
 		_entropy_source: ES, _our_peerstorage_encryption_key: PeerStorageKey,
 	) -> Self {
+		#[cfg(peer_storage)]
+		let our_peerstorage_encryptor: PeerStorageEncryptor = Arc::new({
+			let key = _our_peerstorage_encryption_key.clone();
+			move |plaintext: Vec<u8>, random_bytes: [u8; 32]| {
+				DecryptedOurPeerStorage::new(plaintext)
+					.encrypt(&key, &random_bytes)
+					.into_vec()
+			}
+		});
 		Self {
 			monitors: RwLock::new(new_hash_map()),
 			chain_source,
@@ -671,7 +691,33 @@ where
 			event_notifier: Arc::new(Notifier::new()),
 			pending_send_only_events: Mutex::new(Vec::new()),
 			#[cfg(peer_storage)]
-			our_peerstorage_encryption_key: _our_peerstorage_encryption_key,
+			our_peerstorage_encryptor,
+		}
+	}
+
+	/// Creates a new `ChainMonitor` using an operation-based encryptor for peer-storage backups.
+	///
+	/// This is intended for integrations which do not want to pass a raw
+	/// [`PeerStorageKey`] into the host and instead wish to keep peer-storage
+	/// encryption behind a signer or external operation boundary.
+	pub fn new_with_peer_storage_encryptor(
+		chain_source: Option<C>, broadcaster: T, logger: L, feeest: F, persister: P,
+		_entropy_source: ES, _our_peerstorage_encryptor: PeerStorageEncryptor,
+	) -> Self {
+		Self {
+			monitors: RwLock::new(new_hash_map()),
+			chain_source,
+			broadcaster,
+			logger,
+			fee_estimator: feeest,
+			persister,
+			_entropy_source,
+			pending_monitor_events: Mutex::new(Vec::new()),
+			highest_chain_height: AtomicUsize::new(0),
+			event_notifier: Arc::new(Notifier::new()),
+			pending_send_only_events: Mutex::new(Vec::new()),
+			#[cfg(peer_storage)]
+			our_peerstorage_encryptor: _our_peerstorage_encryptor,
 		}
 	}
 
@@ -1061,13 +1107,12 @@ where
 		}
 
 		let serialised_channels = monitors_list.encode();
-		let our_peer_storage = DecryptedOurPeerStorage::new(serialised_channels);
-		let cipher = our_peer_storage.encrypt(&self.our_peerstorage_encryption_key, &random_bytes);
+		let cipher = (self.our_peerstorage_encryptor)(serialised_channels, random_bytes);
 
 		log_debug!(self.logger, "Sending Peer Storage to {}", log_pubkey!(their_node_id));
 		let send_peer_storage_event = MessageSendEvent::SendPeerStorage {
 			node_id: their_node_id,
-			msg: PeerStorage { data: cipher.into_vec() },
+			msg: PeerStorage { data: cipher },
 		};
 
 		self.pending_send_only_events.lock().unwrap().push(send_peer_storage_event)

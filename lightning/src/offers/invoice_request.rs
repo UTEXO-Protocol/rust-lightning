@@ -83,6 +83,7 @@ use crate::offers::parse::{Bolt12ParseError, Bolt12SemanticError, ParsedMessage}
 use crate::offers::payer::{PayerContents, PayerTlvStream, PayerTlvStreamRef};
 use crate::offers::signer::{Metadata, MetadataMaterial};
 use crate::onion_message::dns_resolution::HumanReadableName;
+use crate::sign::NodeSigner;
 use crate::types::features::InvoiceRequestFeatures;
 use crate::types::payment::PaymentHash;
 use crate::types::string::{PrintableString, UntrustedString};
@@ -94,6 +95,7 @@ use bitcoin::constants::ChainHash;
 use bitcoin::network::Network;
 use bitcoin::secp256k1::schnorr::Signature;
 use bitcoin::secp256k1::{self, Keypair, PublicKey, Secp256k1};
+use core::ops::Deref;
 
 #[cfg(not(c_bindings))]
 use crate::offers::invoice::{DerivedSigningPubkey, ExplicitSigningPubkey, InvoiceBuilder};
@@ -148,6 +150,24 @@ macro_rules! invoice_request_derived_payer_signing_pubkey_builder_methods {
 		) -> Self {
 			let payment_id = Some(payment_id);
 			let derivation_material = MetadataMaterial::new(nonce, expanded_key, payment_id);
+			let metadata = Metadata::DerivedSigningPubkey(derivation_material);
+			Self {
+				offer,
+				invoice_request: Self::create_contents(offer, metadata),
+				payer_signing_pubkey: None,
+				secp_ctx: Some(secp_ctx),
+			}
+		}
+
+		pub(super) fn deriving_signing_pubkey_with_signer<NS: Deref>(
+			offer: &'a Offer, node_signer: &NS, nonce: Nonce,
+			secp_ctx: &'b Secp256k1<$secp_context>, payment_id: PaymentId,
+		) -> Self
+		where
+			NS::Target: NodeSigner,
+		{
+			let payment_id = Some(payment_id);
+			let derivation_material = MetadataMaterial::new_with_signer(nonce, node_signer, payment_id);
 			let metadata = Metadata::DerivedSigningPubkey(derivation_material);
 			Self {
 				offer,
@@ -823,7 +843,43 @@ macro_rules! invoice_request_verify_method {
 		})
 	}
 
-/// Verifies that the request was for an offer created using the given key by checking a nonce
+	#[rustfmt::skip]
+	/// Similar to [`InvoiceRequest::verify_using_metadata`] but verifies the request using
+	/// signer-owned inbound payment material instead of requiring direct access to an
+	/// [`ExpandedKey`].
+	///
+	/// Returns the verified request which contains the derived keys needed to sign a
+	/// [`Bolt12Invoice`] for the request if they could be extracted from the metadata.
+	///
+	/// [`Bolt12Invoice`]: crate::offers::invoice::Bolt12Invoice
+	/// [`ExpandedKey`]: crate::ln::inbound_payment::ExpandedKey
+	pub fn verify_using_metadata_with_signer<
+		NS: Deref,
+		#[cfg(not(c_bindings))]
+		T: secp256k1::Signing
+	>(
+		$self: $self_type, node_signer: &NS,
+		#[cfg(not(c_bindings))]
+		secp_ctx: &Secp256k1<T>,
+		#[cfg(c_bindings)]
+		secp_ctx: &Secp256k1<secp256k1::All>,
+	) -> Result<VerifiedInvoiceRequest, ()>
+	where
+		NS::Target: NodeSigner,
+	{
+		let (offer_id, keys) =
+			$self.contents.inner.offer.verify_using_metadata_with_signer(&$self.bytes, node_signer, secp_ctx)?;
+		Ok(VerifiedInvoiceRequest {
+			offer_id,
+			#[cfg(not(c_bindings))]
+			inner: $self,
+			#[cfg(c_bindings)]
+			inner: $self.clone(),
+			keys,
+		})
+	}
+
+	/// Verifies that the request was for an offer created using the given key by checking a nonce
 	/// included with the [`BlindedMessagePath`] for which the request was sent through.
 	///
 	/// Returns the verified request which contains the derived keys needed to sign a
@@ -843,6 +899,43 @@ macro_rules! invoice_request_verify_method {
 	) -> Result<VerifiedInvoiceRequest, ()> {
 		let (offer_id, keys) = $self.contents.inner.offer.verify_using_recipient_data(
 			&$self.bytes, nonce, key, secp_ctx
+		)?;
+		Ok(VerifiedInvoiceRequest {
+			offer_id,
+			#[cfg(not(c_bindings))]
+			inner: $self,
+			#[cfg(c_bindings)]
+			inner: $self.clone(),
+			keys,
+		})
+	}
+
+	#[rustfmt::skip]
+	/// Similar to [`InvoiceRequest::verify_using_recipient_data`] but verifies the request using
+	/// signer-owned inbound payment material instead of requiring direct access to an
+	/// [`ExpandedKey`].
+	///
+	/// Returns the verified request which contains the derived keys needed to sign a
+	/// [`Bolt12Invoice`] for the request if they could be extracted from the metadata.
+	///
+	/// [`Bolt12Invoice`]: crate::offers::invoice::Bolt12Invoice
+	/// [`ExpandedKey`]: crate::ln::inbound_payment::ExpandedKey
+	pub fn verify_using_recipient_data_with_signer<
+		NS: Deref,
+		#[cfg(not(c_bindings))]
+		T: secp256k1::Signing
+	>(
+		$self: $self_type, nonce: Nonce, node_signer: &NS,
+		#[cfg(not(c_bindings))]
+		secp_ctx: &Secp256k1<T>,
+		#[cfg(c_bindings)]
+		secp_ctx: &Secp256k1<secp256k1::All>,
+	) -> Result<VerifiedInvoiceRequest, ()>
+	where
+		NS::Target: NodeSigner,
+	{
+		let (offer_id, keys) = $self.contents.inner.offer.verify_using_recipient_data_with_signer(
+			&$self.bytes, nonce, node_signer, secp_ctx
 		)?;
 		Ok(VerifiedInvoiceRequest {
 			offer_id,

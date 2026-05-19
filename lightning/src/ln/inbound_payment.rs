@@ -176,6 +176,35 @@ where
 	Ok((ldk_pmt_hash, payment_secret))
 }
 
+pub(crate) fn create_from_random_bytes(
+	keys: &ExpandedKey, min_value_msat: Option<u64>, invoice_expiry_delta_secs: u32,
+	random_bytes: [u8; 32], current_time: u64, min_final_cltv_expiry_delta: Option<u16>,
+) -> Result<(PaymentHash, PaymentSecret), ()> {
+	let metadata_bytes = construct_metadata_bytes(
+		min_value_msat,
+		if min_final_cltv_expiry_delta.is_some() {
+			Method::LdkPaymentHashCustomFinalCltv
+		} else {
+			Method::LdkPaymentHash
+		},
+		invoice_expiry_delta_secs,
+		current_time,
+		min_final_cltv_expiry_delta,
+	)?;
+
+	let mut iv_bytes = [0 as u8; IV_LEN];
+	iv_bytes.copy_from_slice(&random_bytes[..IV_LEN]);
+
+	let mut hmac = HmacEngine::<Sha256>::new(&keys.ldk_pmt_hash_key);
+	hmac.input(&iv_bytes);
+	hmac.input(&metadata_bytes);
+	let payment_preimage_bytes = Hmac::from_engine(hmac).to_byte_array();
+
+	let ldk_pmt_hash = PaymentHash(Sha256::hash(&payment_preimage_bytes).to_byte_array());
+	let payment_secret = construct_payment_secret(&iv_bytes, &metadata_bytes, &keys.metadata_key);
+	Ok((ldk_pmt_hash, payment_secret))
+}
+
 /// Equivalent to [`crate::ln::channelmanager::ChannelManager::create_inbound_payment_for_hash`],
 /// but no `ChannelManager` is required. Useful for generating invoices for [phantom node payments]
 /// without a `ChannelManager`.
@@ -345,7 +374,7 @@ fn construct_payment_secret(
 /// [`NodeSigner::get_expanded_key`]: crate::sign::NodeSigner::get_expanded_key
 /// [`create_inbound_payment`]: crate::ln::channelmanager::ChannelManager::create_inbound_payment
 /// [`create_inbound_payment_for_hash`]: crate::ln::channelmanager::ChannelManager::create_inbound_payment_for_hash
-pub(super) fn verify<L: Deref>(
+pub(crate) fn verify<L: Deref>(
 	payment_hash: PaymentHash, payment_data: &msgs::FinalOnionHopData, highest_seen_timestamp: u64,
 	keys: &ExpandedKey, logger: &L,
 ) -> Result<(Option<PaymentPreimage>, Option<u16>), ()>
@@ -447,7 +476,7 @@ where
 	Ok((payment_preimage, min_final_cltv_expiry_delta))
 }
 
-pub(super) fn get_payment_preimage(
+pub(crate) fn get_payment_preimage(
 	payment_hash: PaymentHash, payment_secret: PaymentSecret, keys: &ExpandedKey,
 ) -> Result<PaymentPreimage, APIError> {
 	let (iv_bytes, metadata_bytes) = decrypt_metadata(payment_secret, keys);

@@ -84,6 +84,54 @@ pub(crate) fn chachapoly_encrypt_with_swapped_aad(
 	plaintext
 }
 
+/// Decrypts ciphertext produced by [`chachapoly_encrypt_with_swapped_aad`] or plain
+/// [`ChaChaPolyWriteAdapter`] output, returning the plaintext and whether the swapped-AAD form was
+/// used.
+pub(crate) fn chachapoly_decrypt_with_optional_aad(
+	ciphertext: &[u8], key: [u8; 32], aad: [u8; 32],
+) -> Result<(Vec<u8>, bool), DecodeError> {
+	if ciphertext.len() < 16 {
+		return Err(DecodeError::InvalidValue);
+	}
+
+	let mut chacha = ChaCha20::new(&key[..], &[0; 12]);
+	let mut mac_key = [0u8; 64];
+	chacha.process_in_place(&mut mac_key);
+
+	#[cfg(not(fuzzing))]
+	let mut mac = Poly1305::new(&mac_key[..32]);
+	#[cfg(fuzzing)]
+	let mut mac = Poly1305::new(&key);
+
+	let decrypted_len = ciphertext.len() - 16;
+	let mut plaintext = ciphertext[..decrypted_len].to_vec();
+	mac.input(&plaintext);
+	chacha.process_in_place(&mut plaintext);
+
+	if decrypted_len % 16 != 0 {
+		mac.input(&[0; 16][0..16 - (decrypted_len % 16)]);
+	}
+
+	let mut mac_aad = mac;
+	mac_aad.input(&aad[..]);
+	mac_aad.input(&(decrypted_len as u64).to_le_bytes());
+	mac_aad.input(&32u64.to_le_bytes());
+
+	mac.input(&0u64.to_le_bytes());
+	mac.input(&(decrypted_len as u64).to_le_bytes());
+
+	let mut tag = [0u8; 16];
+	tag.copy_from_slice(&ciphertext[decrypted_len..]);
+
+	if fixed_time_eq(&mac.result(), &tag) {
+		Ok((plaintext, false))
+	} else if fixed_time_eq(&mac_aad.result(), &tag) {
+		Ok((plaintext, true))
+	} else {
+		Err(DecodeError::InvalidValue)
+	}
+}
+
 /// Enables the use of the serialization macros for objects that need to be simultaneously decrypted
 /// and deserialized. This allows us to avoid an intermediate Vec allocation.
 ///

@@ -99,7 +99,7 @@ use crate::offers::offer::{
 use crate::offers::parse::{Bech32Encode, Bolt12ParseError, Bolt12SemanticError, ParsedMessage};
 use crate::offers::payer::{PayerContents, PayerTlvStream, PayerTlvStreamRef};
 use crate::offers::signer::{self, Metadata, MetadataMaterial};
-use crate::sign::EntropySource;
+use crate::sign::{EntropySource, NodeSigner};
 use crate::types::features::InvoiceRequestFeatures;
 use crate::types::payment::PaymentHash;
 use crate::types::string::PrintableString;
@@ -231,6 +231,39 @@ macro_rules! refund_builder_methods { (
 
 		let payment_id = Some(payment_id);
 		let derivation_material = MetadataMaterial::new(nonce, expanded_key, payment_id);
+		let metadata = Metadata::DerivedSigningPubkey(derivation_material);
+		Ok(Self {
+			refund: RefundContents {
+				payer: PayerContents(metadata), description: String::new(), absolute_expiry: None,
+				issuer: None, chain: None, amount_msats, features: InvoiceRequestFeatures::empty(),
+				quantity: None, payer_signing_pubkey: node_id, payer_note: None, paths: None,
+				#[cfg(test)]
+				experimental_foo: None,
+				#[cfg(test)]
+				experimental_bar: None,
+			},
+			secp_ctx: Some(secp_ctx),
+		})
+	}
+
+	/// Similar to [`RefundBuilder::deriving_signing_pubkey`] but derives payer metadata using
+	/// signer-owned inbound payment material instead of requiring direct access to an
+	/// [`ExpandedKey`].
+	///
+	/// [`ExpandedKey`]: crate::ln::inbound_payment::ExpandedKey
+	pub fn deriving_signing_pubkey_with_signer<NS: Deref>(
+		node_id: PublicKey, node_signer: &NS, nonce: Nonce,
+		secp_ctx: &'a Secp256k1<$secp_context>, amount_msats: u64, payment_id: PaymentId
+	) -> Result<Self, Bolt12SemanticError>
+	where
+		NS::Target: NodeSigner,
+	{
+		if amount_msats > MAX_VALUE_MSAT {
+			return Err(Bolt12SemanticError::InvalidAmount);
+		}
+
+		let payment_id = Some(payment_id);
+		let derivation_material = MetadataMaterial::new_with_signer(nonce, node_signer, payment_id);
 		let metadata = Metadata::DerivedSigningPubkey(derivation_material);
 		Ok(Self {
 			refund: RefundContents {
@@ -661,6 +694,28 @@ macro_rules! respond_with_derived_signing_pubkey_methods { ($self: ident, $build
 
 		let nonce = Nonce::from_entropy_source(entropy_source);
 		let keys = signer::derive_keys(nonce, expanded_key);
+		<$builder>::for_refund_using_keys($self, payment_paths, created_at, payment_hash, keys)
+	}
+
+	/// Similar to [`Refund::respond_using_derived_keys_no_std`] but derives response keys using
+	/// signer-owned inbound payment material instead of requiring direct access to an
+	/// [`ExpandedKey`].
+	///
+	/// [`ExpandedKey`]: crate::ln::inbound_payment::ExpandedKey
+	pub fn respond_using_derived_keys_with_signer_no_std<ES: Deref, NS: Deref>(
+		&$self, payment_paths: Vec<BlindedPaymentPath>, payment_hash: PaymentHash,
+		created_at: core::time::Duration, node_signer: &NS, entropy_source: ES
+	) -> Result<$builder, Bolt12SemanticError>
+	where
+		ES::Target: EntropySource,
+		NS::Target: NodeSigner,
+	{
+		if $self.features().requires_unknown_bits() {
+			return Err(Bolt12SemanticError::UnknownRequiredFeatures);
+		}
+
+		let nonce = Nonce::from_entropy_source(entropy_source);
+		let keys = signer::derive_keys_with_signer(nonce, node_signer);
 		<$builder>::for_refund_using_keys($self, payment_paths, created_at, payment_hash, keys)
 	}
 } }

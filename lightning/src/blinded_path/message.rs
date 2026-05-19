@@ -26,7 +26,7 @@ use crate::offers::nonce::Nonce;
 use crate::offers::offer::OfferId;
 use crate::onion_message::packet::ControlTlvs;
 use crate::routing::gossip::{NodeId, ReadOnlyNetworkGraph};
-use crate::sign::{EntropySource, NodeSigner, ReceiveAuthKey, Recipient};
+use crate::sign::{EntropySource, NodeSigner, Recipient};
 use crate::types::payment::PaymentHash;
 use crate::util::scid_utils;
 use crate::util::ser::{FixedLengthReader, LengthReadableArgs, Readable, Writeable, Writer};
@@ -54,30 +54,32 @@ impl Readable for BlindedMessagePath {
 
 impl BlindedMessagePath {
 	/// Create a one-hop blinded path for a message.
-	pub fn one_hop<ES: Deref, T: secp256k1::Signing + secp256k1::Verification>(
-		recipient_node_id: PublicKey, local_node_receive_key: ReceiveAuthKey,
-		context: MessageContext, entropy_source: ES, secp_ctx: &Secp256k1<T>,
-	) -> Self
-	where
-		ES::Target: EntropySource,
-	{
-		Self::new(&[], recipient_node_id, local_node_receive_key, context, entropy_source, secp_ctx)
-	}
-
-	/// Create a path for an onion message, to be forwarded along `node_pks`.
-	pub fn new<ES: Deref, T: secp256k1::Signing + secp256k1::Verification>(
-		intermediate_nodes: &[MessageForwardNode], recipient_node_id: PublicKey,
-		local_node_receive_key: ReceiveAuthKey, context: MessageContext, entropy_source: ES,
+	pub fn one_hop<ES: Deref, NS: Deref, T: secp256k1::Signing + secp256k1::Verification>(
+		recipient_node_id: PublicKey, node_signer: &NS, context: MessageContext, entropy_source: ES,
 		secp_ctx: &Secp256k1<T>,
 	) -> Self
 	where
 		ES::Target: EntropySource,
+		NS::Target: NodeSigner,
+	{
+		Self::new(&[], recipient_node_id, node_signer, context, entropy_source, secp_ctx)
+	}
+
+	/// Create a path for an onion message, to be forwarded along `node_pks`.
+	pub fn new<ES: Deref, NS: Deref, T: secp256k1::Signing + secp256k1::Verification>(
+		intermediate_nodes: &[MessageForwardNode], recipient_node_id: PublicKey,
+		node_signer: &NS, context: MessageContext, entropy_source: ES,
+		secp_ctx: &Secp256k1<T>,
+	) -> Self
+	where
+		ES::Target: EntropySource,
+		NS::Target: NodeSigner,
 	{
 		BlindedMessagePath::new_with_dummy_hops(
 			intermediate_nodes,
 			recipient_node_id,
 			0,
-			local_node_receive_key,
+			node_signer,
 			context,
 			entropy_source,
 			secp_ctx,
@@ -88,13 +90,14 @@ impl BlindedMessagePath {
 	///
 	/// Note:
 	/// At most [`MAX_DUMMY_HOPS_COUNT`] dummy hops can be added to the blinded path.
-	pub fn new_with_dummy_hops<ES: Deref, T: secp256k1::Signing + secp256k1::Verification>(
+	pub fn new_with_dummy_hops<ES: Deref, NS: Deref, T: secp256k1::Signing + secp256k1::Verification>(
 		intermediate_nodes: &[MessageForwardNode], recipient_node_id: PublicKey,
-		dummy_hop_count: usize, local_node_receive_key: ReceiveAuthKey, context: MessageContext,
+		dummy_hop_count: usize, node_signer: &NS, context: MessageContext,
 		entropy_source: ES, secp_ctx: &Secp256k1<T>,
 	) -> Self
 	where
 		ES::Target: EntropySource,
+		NS::Target: NodeSigner,
 	{
 		let introduction_node = IntroductionNode::NodeId(
 			intermediate_nodes.first().map_or(recipient_node_id, |n| n.node_id),
@@ -113,7 +116,7 @@ impl BlindedMessagePath {
 				dummy_hop_count,
 				context,
 				&blinding_secret,
-				local_node_receive_key,
+				node_signer,
 			),
 		})
 	}
@@ -690,19 +693,20 @@ pub(crate) const MESSAGE_PADDING_ROUND_OFF: usize = 100;
 pub const MAX_DUMMY_HOPS_COUNT: usize = 10;
 
 /// Construct blinded onion message hops for the given `intermediate_nodes` and `recipient_node_id`.
-pub(super) fn blinded_hops<T: secp256k1::Signing + secp256k1::Verification>(
+pub(super) fn blinded_hops<NS: Deref, T: secp256k1::Signing + secp256k1::Verification>(
 	secp_ctx: &Secp256k1<T>, intermediate_nodes: &[MessageForwardNode],
 	recipient_node_id: PublicKey, dummy_hop_count: usize, context: MessageContext,
-	session_priv: &SecretKey, local_node_receive_key: ReceiveAuthKey,
-) -> Vec<BlindedHop> {
+	session_priv: &SecretKey, node_signer: &NS,
+) -> Vec<BlindedHop>
+where
+	NS::Target: NodeSigner,
+{
 	let dummy_count = cmp::min(dummy_hop_count, MAX_DUMMY_HOPS_COUNT);
 	let pks = intermediate_nodes
 		.iter()
-		.map(|node| (node.node_id, None))
-		.chain(
-			core::iter::repeat((recipient_node_id, Some(local_node_receive_key))).take(dummy_count),
-		)
-		.chain(core::iter::once((recipient_node_id, Some(local_node_receive_key))));
+		.map(|node| (node.node_id, false))
+		.chain(core::iter::repeat((recipient_node_id, true)).take(dummy_count))
+		.chain(core::iter::once((recipient_node_id, true)));
 	let is_compact = intermediate_nodes.iter().any(|node| node.short_channel_id.is_some());
 
 	let tlvs = pks
@@ -721,13 +725,13 @@ pub(super) fn blinded_hops<T: secp256k1::Signing + secp256k1::Verification>(
 
 	if is_compact {
 		let path = pks.zip(tlvs);
-		utils::construct_blinded_hops(secp_ctx, path, session_priv)
+		utils::construct_blinded_message_hops(secp_ctx, path, session_priv, node_signer)
 	} else {
 		let path =
 			pks.zip(tlvs.map(|tlv| BlindedPathWithPadding {
 				tlvs: tlv,
 				round_off: MESSAGE_PADDING_ROUND_OFF,
 			}));
-		utils::construct_blinded_hops(secp_ctx, path, session_priv)
+		utils::construct_blinded_message_hops(secp_ctx, path, session_priv, node_signer)
 	}
 }

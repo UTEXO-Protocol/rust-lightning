@@ -36,7 +36,7 @@ use crate::ln::msgs::{
 };
 use crate::ln::onion_utils;
 use crate::routing::gossip::{NetworkGraph, NodeId, ReadOnlyNetworkGraph};
-use crate::sign::{EntropySource, NodeSigner, ReceiveAuthKey, Recipient};
+use crate::sign::{EntropySource, NodeSigner, Recipient};
 use crate::types::features::{InitFeatures, NodeFeatures};
 use crate::util::async_poll::{MultiResultFuturePoller, ResultFuture};
 use crate::util::logger::{Logger, WithContext};
@@ -517,10 +517,12 @@ pub trait MessageRouter {
 
 	/// Creates [`BlindedMessagePath`]s to the `recipient` node. The nodes in `peers` are assumed to
 	/// be direct peers with the `recipient`.
-	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification>(
-		&self, recipient: PublicKey, local_node_receive_key: ReceiveAuthKey,
+	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification, NS: Deref>(
+		&self, recipient: PublicKey, node_signer: &NS,
 		context: MessageContext, peers: Vec<MessageForwardNode>, secp_ctx: &Secp256k1<T>,
-	) -> Result<Vec<BlindedMessagePath>, ()>;
+	) -> Result<Vec<BlindedMessagePath>, ()>
+	where
+		NS::Target: NodeSigner;
 }
 
 /// A [`MessageRouter`] that can only route to a directly connected [`Destination`].
@@ -576,12 +578,16 @@ where
 
 	pub(crate) fn create_blinded_paths_from_iter<
 		I: ExactSizeIterator<Item = MessageForwardNode>,
+		NS: Deref,
 		T: secp256k1::Signing + secp256k1::Verification,
 	>(
-		network_graph: &G, recipient: PublicKey, local_node_receive_key: ReceiveAuthKey,
+		network_graph: &G, recipient: PublicKey, node_signer: &NS,
 		context: MessageContext, peers: I, entropy_source: &ES, secp_ctx: &Secp256k1<T>,
 		compact_paths: bool,
-	) -> Result<Vec<BlindedMessagePath>, ()> {
+	) -> Result<Vec<BlindedMessagePath>, ()>
+	where
+		NS::Target: NodeSigner,
+	{
 		// Limit the number of blinded paths that are computed.
 		const MAX_PATHS: usize = 3;
 
@@ -631,7 +637,7 @@ where
 				intermediate_hops,
 				recipient,
 				dummy_hops_count,
-				local_node_receive_key,
+				node_signer,
 				context.clone(),
 				&**entropy_source,
 				secp_ctx,
@@ -729,14 +735,17 @@ where
 		Self::find_path(&self.network_graph, sender, peers, destination)
 	}
 
-	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification>(
-		&self, recipient: PublicKey, local_node_receive_key: ReceiveAuthKey,
+	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification, NS: Deref>(
+		&self, recipient: PublicKey, node_signer: &NS,
 		context: MessageContext, peers: Vec<MessageForwardNode>, secp_ctx: &Secp256k1<T>,
-	) -> Result<Vec<BlindedMessagePath>, ()> {
+	) -> Result<Vec<BlindedMessagePath>, ()>
+	where
+		NS::Target: NodeSigner,
+	{
 		Self::create_blinded_paths_from_iter(
 			&self.network_graph,
 			recipient,
-			local_node_receive_key,
+			node_signer,
 			context,
 			peers.into_iter(),
 			&self.entropy_source,
@@ -789,14 +798,17 @@ where
 		DefaultMessageRouter::<G, L, ES>::find_path(&self.network_graph, sender, peers, destination)
 	}
 
-	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification>(
-		&self, recipient: PublicKey, local_node_receive_key: ReceiveAuthKey,
+	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification, NS: Deref>(
+		&self, recipient: PublicKey, node_signer: &NS,
 		context: MessageContext, peers: Vec<MessageForwardNode>, secp_ctx: &Secp256k1<T>,
-	) -> Result<Vec<BlindedMessagePath>, ()> {
+	) -> Result<Vec<BlindedMessagePath>, ()>
+	where
+		NS::Target: NodeSigner,
+	{
 		DefaultMessageRouter::create_blinded_paths_from_iter(
 			&self.network_graph,
 			recipient,
-			local_node_receive_key,
+			node_signer,
 			context,
 			peers.into_iter(),
 			&self.entropy_source,
@@ -831,10 +843,13 @@ impl MessageRouter for NullMessageRouter {
 		Err(())
 	}
 
-	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification>(
-		&self, _recipient: PublicKey, _local_node_receive_key: ReceiveAuthKey,
+	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification, NS: Deref>(
+		&self, _recipient: PublicKey, _node_signer: &NS,
 		_context: MessageContext, _peers: Vec<MessageForwardNode>, _secp_ctx: &Secp256k1<T>,
-	) -> Result<Vec<BlindedMessagePath>, ()> {
+	) -> Result<Vec<BlindedMessagePath>, ()>
+	where
+		NS::Target: NodeSigner,
+	{
 		Ok(vec![])
 	}
 }
@@ -1173,12 +1188,11 @@ where
 			},
 		}
 	};
-	let receiving_context_auth_key = node_signer.get_receive_auth_key();
 	let next_hop = onion_utils::decode_next_untagged_hop(
 		onion_decode_ss,
 		&msg.onion_routing_packet.hop_data[..],
 		msg.onion_routing_packet.hmac,
-		(control_tlvs_ss, custom_handler.deref(), receiving_context_auth_key, logger.deref()),
+		(control_tlvs_ss, custom_handler.deref(), &node_signer, logger.deref()),
 	);
 
 	// Constructs the next onion message using packet data and blinding logic.
@@ -1632,7 +1646,7 @@ where
 		self.message_router
 			.create_blinded_paths(
 				recipient,
-				self.node_signer.get_receive_auth_key(),
+				&self.node_signer,
 				context,
 				peers,
 				secp_ctx,

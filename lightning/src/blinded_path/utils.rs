@@ -17,14 +17,15 @@ use bitcoin::secp256k1::{self, PublicKey, Scalar, Secp256k1, SecretKey};
 
 use super::message::BlindedMessagePath;
 use super::{BlindedHop, BlindedPath};
-use crate::crypto::streams::{chachapoly_encrypt_with_swapped_aad, ChaChaPolyWriteAdapter};
+use crate::crypto::streams::ChaChaPolyWriteAdapter;
 use crate::io;
 use crate::ln::onion_utils;
 use crate::onion_message::messenger::Destination;
-use crate::sign::ReceiveAuthKey;
+use crate::sign::NodeSigner;
 use crate::util::ser::{Writeable, Writer};
 
 use core::borrow::Borrow;
+use core::ops::Deref;
 
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -150,7 +151,7 @@ fn construct_keys_for_blinded_path<'a, T, I, F, H>(
 
 struct PublicKeyWithTlvs<W: Writeable> {
 	pubkey: PublicKey,
-	hop_recv_key: Option<ReceiveAuthKey>,
+	authenticate_payload: bool,
 	tlvs: W,
 }
 
@@ -165,15 +166,49 @@ pub(crate) fn construct_blinded_hops<'a, T, I, W>(
 ) -> Vec<BlindedHop>
 where
 	T: secp256k1::Signing + secp256k1::Verification,
-	I: Iterator<Item = ((PublicKey, Option<ReceiveAuthKey>), W)>,
+	I: Iterator<Item = (PublicKey, W)>,
 	W: Writeable,
 {
 	let mut blinded_hops = Vec::with_capacity(unblinded_path.size_hint().0);
 	construct_keys_for_blinded_path(
 		secp_ctx,
-		unblinded_path.map(|((pubkey, hop_recv_key), tlvs)| PublicKeyWithTlvs {
+		unblinded_path.map(|(pubkey, tlvs)| PublicKeyWithTlvs {
 			pubkey,
-			hop_recv_key,
+			authenticate_payload: false,
+			tlvs,
+		}),
+		session_priv,
+		|blinded_node_id, _, _, encrypted_payload_rho, unblinded_hop_data, _| {
+			let hop_data = unblinded_hop_data.unwrap();
+			blinded_hops.push(BlindedHop {
+				blinded_node_id,
+				encrypted_payload: ChaChaPolyWriteAdapter::new(
+					encrypted_payload_rho,
+					&hop_data.tlvs,
+				)
+				.encode(),
+			});
+		},
+	);
+	blinded_hops
+}
+
+pub(crate) fn construct_blinded_message_hops<'a, T, I, W, NS>(
+	secp_ctx: &Secp256k1<T>, unblinded_path: I, session_priv: &SecretKey, node_signer: &NS,
+) -> Vec<BlindedHop>
+where
+	T: secp256k1::Signing + secp256k1::Verification,
+	I: Iterator<Item = ((PublicKey, bool), W)>,
+	W: Writeable,
+	NS: Deref,
+	NS::Target: NodeSigner,
+{
+	let mut blinded_hops = Vec::with_capacity(unblinded_path.size_hint().0);
+	construct_keys_for_blinded_path(
+		secp_ctx,
+		unblinded_path.map(|((pubkey, authenticate_payload), tlvs)| PublicKeyWithTlvs {
+			pubkey,
+			authenticate_payload,
 			tlvs,
 		}),
 		session_priv,
@@ -184,7 +219,8 @@ where
 				encrypted_payload: encrypt_payload(
 					hop_data.tlvs,
 					encrypted_payload_rho,
-					hop_data.hop_recv_key,
+					hop_data.authenticate_payload,
+					node_signer,
 				),
 			});
 		},
@@ -193,11 +229,14 @@ where
 }
 
 /// Encrypt TLV payload to be used as a [`crate::blinded_path::BlindedHop::encrypted_payload`].
-fn encrypt_payload<P: Writeable>(
-	payload: P, encrypted_tlvs_rho: [u8; 32], hop_recv_key: Option<ReceiveAuthKey>,
-) -> Vec<u8> {
-	if let Some(hop_recv_key) = hop_recv_key {
-		chachapoly_encrypt_with_swapped_aad(payload.encode(), encrypted_tlvs_rho, hop_recv_key.0)
+fn encrypt_payload<P: Writeable, NS: Deref>(
+	payload: P, encrypted_tlvs_rho: [u8; 32], authenticate_payload: bool, node_signer: &NS,
+) -> Vec<u8>
+where
+	NS::Target: NodeSigner,
+{
+	if authenticate_payload {
+		node_signer.encrypt_blinded_message_payload(payload.encode(), encrypted_tlvs_rho)
 	} else {
 		let write_adapter = ChaChaPolyWriteAdapter::new(encrypted_tlvs_rho, &payload);
 		write_adapter.encode()

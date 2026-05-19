@@ -19,9 +19,10 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::TxOut;
 use rgb_lib::{
 	bitcoin::psbt::Psbt as RgbLibPsbt,
+	keys::WitnessVersion,
 	wallet::{
 		rust_only::{AssetColoringInfo, ColoringInfo},
-		DatabaseType, SinglesigKeys, Wallet, WalletData,
+		DatabaseType, OnlineOptions, SinglesigKeys, Wallet, WalletData,
 	},
 	AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
 	FileContent, RgbTransfer, RgbTransport, WitnessOrd,
@@ -180,6 +181,7 @@ fn _new_rgb_wallet(
 		vanilla_keychain: None,
 		master_fingerprint,
 		mnemonic: None,
+		witness_version: WitnessVersion::Taproot,
 	};
 	Wallet::new(
 		WalletData {
@@ -235,7 +237,11 @@ fn _get_rgb_wallet_online_blocking(
 				master_fingerprint,
 				reuse_addresses,
 			);
-			wallet.go_online(true, indexer_url)?;
+			wallet.go_online(OnlineOptions {
+				indexer_url,
+				skip_consistency_check: true,
+				vanilla_sync_lookback: 0,
+			})?;
 			Ok(wallet)
 		});
 		match jh.join() {
@@ -264,7 +270,11 @@ async fn _accept_transfer(
 			master_fingerprint,
 			reuse_addresses,
 		);
-		wallet.go_online(true, indexer_url)?;
+		wallet.go_online(OnlineOptions {
+			indexer_url,
+			skip_consistency_check: true,
+			vanilla_sync_lookback: 0,
+		})?;
 		wallet.accept_transfer(
 			funding_txid.clone(),
 			funding_vout,
