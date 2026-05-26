@@ -60,14 +60,9 @@ use crate::ln::msgs::PartialSignatureWithNonce;
 use crate::ln::msgs::{UnsignedChannelAnnouncement, UnsignedGossipMessage};
 use crate::ln::script::ShutdownScript;
 use crate::ln::channelmanager::PaymentId;
-use crate::blinded_path::payment::{ReceiveTlvs, UnauthenticatedReceiveTlvs};
 use crate::ln::our_peer_storage::{DecryptedOurPeerStorage, EncryptedOurPeerStorage};
 use crate::offers::invoice::Bolt12Invoice;
-use crate::offers::invoice_request::{InvoiceRequest, InvoiceRequestBuilder, VerifiedInvoiceRequest};
 use crate::offers::nonce::Nonce;
-use crate::offers::offer::{DerivedMetadata, Offer, OfferBuilder};
-use crate::offers::refund::{Refund, RefundBuilder};
-use crate::offers::static_invoice::StaticInvoiceBuilder;
 use crate::offers::invoice::UnsignedBolt12Invoice;
 use crate::rgb_utils::color_htlc;
 use crate::types::features::ChannelTypeFeatures;
@@ -89,8 +84,6 @@ use crate::util::logger::Logger;
 use crate::util::atomic_counter::AtomicCounter;
 use core::convert::TryInto;
 use core::ops::Deref;
-use core::time::Duration;
-use bitcoin::hashes::hmac::Hmac;
 use core::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(taproot)]
 use musig2::types::{PartialSignature, PublicNonce};
@@ -1024,36 +1017,6 @@ pub trait NodeSigner {
 		)
 	}
 
-	/// Authenticates blinded receive TLVs for an offer/refund payment context using signer-owned
-	/// inbound payment material.
-	fn authenticate_receive_tlvs_for_offer_payment(
-		&self, tlvs: UnauthenticatedReceiveTlvs, nonce: Nonce,
-	) -> ReceiveTlvs {
-		tlvs.authenticate_with_signer(nonce, &self)
-	}
-
-	/// Verifies blinded receive TLVs for an offer/refund payment context using signer-owned inbound
-	/// payment material.
-	fn verify_receive_tlvs_for_offer_payment(
-		&self, tlvs: &UnauthenticatedReceiveTlvs, hmac: Hmac<Sha256>, nonce: Nonce,
-	) -> Result<(), ()> {
-		tlvs.verify_for_offer_payment_with_signer(hmac, nonce, &self)
-	}
-
-	/// Verifies an invoice request using offer metadata-derived recipient data.
-	fn verify_invoice_request_using_metadata(
-		&self, invoice_request: InvoiceRequest, secp_ctx: &Secp256k1<All>,
-	) -> Result<VerifiedInvoiceRequest, ()> {
-		invoice_request.verify_using_metadata_with_signer(&self, secp_ctx)
-	}
-
-	/// Verifies an invoice request using signer-owned recipient data.
-	fn verify_invoice_request_using_recipient_data(
-		&self, invoice_request: InvoiceRequest, nonce: Nonce, secp_ctx: &Secp256k1<All>,
-	) -> Result<VerifiedInvoiceRequest, ()> {
-		invoice_request.verify_using_recipient_data_with_signer(nonce, &self, secp_ctx)
-	}
-
 	/// Verifies a BOLT12 invoice using payer metadata-derived recipient data.
 	fn verify_bolt12_invoice_using_metadata(
 		&self, invoice: &Bolt12Invoice, secp_ctx: &Secp256k1<All>,
@@ -1067,64 +1030,6 @@ pub trait NodeSigner {
 		secp_ctx: &Secp256k1<All>,
 	) -> Result<PaymentId, ()> {
 		invoice.verify_using_payer_data_with_signer(payment_id, nonce, &self, secp_ctx)
-	}
-
-	/// Creates an offer builder using signer-owned derived signing data.
-	fn create_offer_builder_with_derived_signing_pubkey<'a>(
-		&self, node_id: PublicKey, nonce: Nonce, secp_ctx: &'a Secp256k1<All>,
-	) -> OfferBuilder<'a, DerivedMetadata, All> {
-		OfferBuilder::deriving_signing_pubkey_with_signer(node_id, &self, nonce, secp_ctx)
-	}
-
-	/// Creates a refund builder using signer-owned derived signing data.
-	fn create_refund_builder_with_derived_signing_pubkey<'a>(
-		&self, node_id: PublicKey, nonce: Nonce, secp_ctx: &'a Secp256k1<All>,
-		amount_msats: u64, payment_id: PaymentId,
-	) -> Result<RefundBuilder<'a, All>, crate::offers::parse::Bolt12SemanticError> {
-		RefundBuilder::deriving_signing_pubkey_with_signer(
-			node_id, &self, nonce, secp_ctx, amount_msats, payment_id,
-		)
-	}
-
-	/// Creates an invoice request builder for an offer using signer-owned derived signing data.
-	fn create_invoice_request_builder_from_offer<'a>(
-		&self, offer: &'a Offer, nonce: Nonce, secp_ctx: &'a Secp256k1<All>, payment_id: PaymentId,
-	) -> Result<InvoiceRequestBuilder<'a, 'a, All>, crate::offers::parse::Bolt12SemanticError> {
-		let builder: InvoiceRequestBuilder<All> =
-			offer.request_invoice_with_signer(&self, nonce, secp_ctx, payment_id)?.into();
-		Ok(builder)
-	}
-
-	/// Creates a static invoice builder using signer-owned derived signing data.
-	fn create_static_invoice_builder_for_offer<'a>(
-		&self, offer: &'a Offer, payment_paths: Vec<crate::blinded_path::payment::BlindedPaymentPath>,
-		message_paths: Vec<crate::blinded_path::message::BlindedMessagePath>, created_at: Duration,
-		nonce: Nonce, secp_ctx: &'a Secp256k1<All>,
-	) -> Result<StaticInvoiceBuilder<'a>, crate::offers::parse::Bolt12SemanticError> {
-		StaticInvoiceBuilder::for_offer_using_derived_keys_with_signer(
-			offer, payment_paths, message_paths, created_at, &self, nonce, secp_ctx,
-		)
-	}
-
-	/// Creates an invoice builder for a refund using signer-owned derived signing data.
-	fn create_invoice_builder_from_refund_using_derived_keys<'a>(
-		&self, refund: &'a Refund, payment_paths: Vec<crate::blinded_path::payment::BlindedPaymentPath>,
-		payment_hash: PaymentHash, created_at: Duration, random_bytes: [u8; 32],
-	) -> Result<crate::offers::invoice::InvoiceBuilder<'a, crate::offers::invoice::DerivedSigningPubkey>, crate::offers::parse::Bolt12SemanticError> {
-		struct FixedEntropySource([u8; 32]);
-		impl EntropySource for FixedEntropySource {
-			fn get_secure_random_bytes(&self) -> [u8; 32] { self.0 }
-		}
-		impl core::ops::Deref for FixedEntropySource {
-			type Target = Self;
-			fn deref(&self) -> &Self::Target { self }
-		}
-		let entropy = FixedEntropySource(random_bytes);
-		refund
-			.respond_using_derived_keys_with_signer_no_std(
-				payment_paths, payment_hash, created_at, &self, &entropy,
-			)
-			.map(Into::into)
 	}
 
 	/// Defines a method to derive a 32-byte encryption key for peer storage.

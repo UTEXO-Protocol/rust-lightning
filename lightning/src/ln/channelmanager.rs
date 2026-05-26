@@ -5820,7 +5820,6 @@ where
 		let entropy = &*self.entropy_source;
 		let router = &*self.router;
 		let refresh_res = self.flow.check_refresh_async_receive_offer_cache(
-			&self.node_signer,
 			peers,
 			channels,
 			entropy,
@@ -13042,7 +13041,6 @@ macro_rules! create_offer_builder { ($self: ident, $builder: ty) => {
 	/// [`InvoiceRequest`]: crate::offers::invoice_request::InvoiceRequest
 	pub fn create_offer_builder(&$self) -> Result<$builder, Bolt12SemanticError> {
 		let builder = $self.flow.create_offer_builder(
-			&$self.node_signer,
 			&*$self.entropy_source, $self.get_peers_for_blinded_path()
 		)?;
 
@@ -13068,7 +13066,7 @@ macro_rules! create_offer_builder { ($self: ident, $builder: ty) => {
 		ME::Target: MessageRouter,
 	{
 		let builder = $self.flow.create_offer_builder_using_router(
-			&$self.node_signer, router, &*$self.entropy_source, $self.get_peers_for_blinded_path()
+			router, &*$self.entropy_source, $self.get_peers_for_blinded_path()
 		)?;
 
 		Ok(builder.into())
@@ -13123,7 +13121,6 @@ macro_rules! create_refund_builder { ($self: ident, $builder: ty) => {
 		let entropy = &*$self.entropy_source;
 
 		let builder = $self.flow.create_refund_builder(
-			&$self.node_signer,
 			entropy, amount_msats, absolute_expiry,
 			payment_id, $self.get_peers_for_blinded_path()
 		)?;
@@ -13168,7 +13165,7 @@ macro_rules! create_refund_builder { ($self: ident, $builder: ty) => {
 		let entropy = &*$self.entropy_source;
 
 		let builder = $self.flow.create_refund_builder_using_router(
-			&$self.node_signer, router, entropy, amount_msats, absolute_expiry,
+			router, entropy, amount_msats, absolute_expiry,
 			payment_id, $self.get_peers_for_blinded_path()
 		)?;
 
@@ -13408,7 +13405,6 @@ where
 		let nonce = Nonce::from_entropy_source(entropy);
 
 		let builder = self.flow.create_invoice_request_builder(
-			&self.node_signer,
 			offer, nonce, payment_id,
 		)?;
 
@@ -13484,7 +13480,6 @@ where
 			Ok((payment_hash, payment_secret)) => {
 				let entropy = &*self.entropy_source;
 				let builder = self.flow.create_invoice_builder_from_refund(
-					&self.node_signer,
 					&self.router, entropy, refund, payment_hash,
 					payment_secret, self.list_usable_channels()
 				)?;
@@ -13750,7 +13745,6 @@ where
 		let entropy = &*self.entropy_source;
 
 		self.flow.test_create_blinded_payment_paths(
-			&self.node_signer,
 			&self.router,
 			entropy,
 			self.list_usable_channels(),
@@ -15634,7 +15628,7 @@ where
 					None => return None,
 				};
 
-				let invoice_request = match self.flow.verify_invoice_request(&self.node_signer, invoice_request, context) {
+				let invoice_request = match self.flow.verify_invoice_request(invoice_request, context) {
 					Ok(InvreqResponseInstructions::SendInvoice(invoice_request)) => invoice_request,
 					Ok(InvreqResponseInstructions::SendStaticInvoice { recipient_id, invoice_slot, invoice_request }) => {
 						self.pending_events.lock().unwrap().push_back((Event::StaticInvoiceRequested {
@@ -15666,7 +15660,7 @@ where
 
 				let entropy = &*self.entropy_source;
 				let (response, context) = self.flow.create_response_for_invoice_request(
-					&self.node_signer, &self.router, entropy, invoice_request, amount_msats,
+					&self.router, entropy, invoice_request, amount_msats,
 					payment_hash, payment_secret, self.list_usable_channels()
 				);
 
@@ -15676,7 +15670,7 @@ where
 				}
 			},
 			OffersMessage::Invoice(invoice) => {
-				let payment_id = match self.flow.verify_bolt12_invoice(&self.node_signer, &invoice, context.as_ref()) {
+				let payment_id = match self.flow.verify_bolt12_invoice(&invoice, context.as_ref()) {
 					Ok(payment_id) => payment_id,
 					Err(()) => return None,
 				};
@@ -15780,7 +15774,6 @@ where
 			None => return None,
 		};
 		let (serve_static_invoice, reply_context) = match self.flow.handle_offer_paths(
-			&self.node_signer,
 			message,
 			context,
 			responder.clone(),

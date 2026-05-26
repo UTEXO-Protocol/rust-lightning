@@ -797,7 +797,6 @@ impl Offer {
 		self.contents.verify_using_recipient_data(&self.bytes, nonce, key, secp_ctx)
 	}
 
-	#[allow(dead_code)]
 	pub(super) fn verify_using_recipient_signer<T: secp256k1::Signing, NS: Deref>(
 		&self, nonce: Nonce, node_signer: &NS, secp_ctx: &Secp256k1<T>,
 	) -> Result<(OfferId, Option<Keypair>), ()>

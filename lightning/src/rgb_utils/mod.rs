@@ -165,7 +165,10 @@ fn _get_indexer_url(kv_store: &dyn KVStoreSync) -> String {
 }
 
 fn _get_reuse_addresses(kv_store: &dyn KVStoreSync) -> bool {
-	kv_store.read_config(WALLET_REUSE_ADDRESSES_FNAME).map(|v| v == "true").unwrap_or(false)
+	kv_store
+		.read_config(WALLET_REUSE_ADDRESSES_FNAME)
+		.map(|v| v == "true")
+		.unwrap_or(false)
 }
 
 fn _new_rgb_wallet(
@@ -208,59 +211,24 @@ fn _get_wallet_data(
 	let account_xpub_colored = _get_account_xpub_colored(kv_store);
 	let master_fingerprint = _get_master_fingerprint(kv_store);
 	let reuse_addresses = _get_reuse_addresses(kv_store);
-	(
-		data_dir,
-		bitcoin_network,
-		account_xpub_vanilla,
-		account_xpub_colored,
-		master_fingerprint,
-		reuse_addresses,
-	)
+	(data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint, reuse_addresses)
 }
 
-/// Open the rgb-lib wallet on a dedicated thread and bring it online so DB-backed RGB inventory
-/// is visible to [`Wallet::color_psbt`].
-///
-/// Uses [`std::thread::scope`] instead of Tokio [`tokio::task::spawn_blocking`] because
-/// [`color_commitment`] / [`color_htlc`] / [`color_closing`] run from synchronous LDK channel
-/// logic that may execute on a Tokio worker; awaiting a Tokio blocking task from
-/// [`futures::executor::block_on`] can stall the runtime and block unrelated work.
-fn _get_rgb_wallet_online_blocking(
-	ldk_data_dir: &Path, kv_store: &dyn KVStoreSync,
-) -> Result<Wallet, RgbLibError> {
-	let (
-		data_dir,
-		bitcoin_network,
-		account_xpub_vanilla,
-		account_xpub_colored,
-		master_fingerprint,
-		reuse_addresses,
-	) = _get_wallet_data(ldk_data_dir, kv_store);
-	let indexer_url = _get_indexer_url(kv_store);
-	std::thread::scope(|s| {
-		let jh = s.spawn(move || -> Result<Wallet, RgbLibError> {
-			let mut wallet = _new_rgb_wallet(
-				data_dir,
-				bitcoin_network,
-				account_xpub_vanilla,
-				account_xpub_colored,
-				master_fingerprint,
-				reuse_addresses,
-			);
-			wallet.go_online(OnlineOptions {
-				indexer_url,
-				skip_consistency_check: true,
-				vanilla_sync_lookback: 0,
-			})?;
-			Ok(wallet)
-		});
-		match jh.join() {
-			Ok(res) => res,
-			Err(_) => Err(RgbLibError::Internal {
-				details: "rgb-lib wallet thread panicked during go_online".to_owned(),
-			}),
-		}
+async fn _get_rgb_wallet(ldk_data_dir: &Path, kv_store: &dyn KVStoreSync) -> Wallet {
+	let (data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint, reuse_addresses) =
+		_get_wallet_data(ldk_data_dir, kv_store);
+	tokio::task::spawn_blocking(move || {
+		_new_rgb_wallet(
+			data_dir,
+			bitcoin_network,
+			account_xpub_vanilla,
+			account_xpub_colored,
+			master_fingerprint,
+			reuse_addresses,
+		)
 	})
+	.await
+	.unwrap()
 }
 
 async fn _accept_transfer(
@@ -268,14 +236,8 @@ async fn _accept_transfer(
 	kv_store: &dyn KVStoreSync,
 ) -> Result<(RgbTransfer, Vec<Assignment>), RgbLibError> {
 	let funding_vout = 1;
-	let (
-		data_dir,
-		bitcoin_network,
-		account_xpub_vanilla,
-		account_xpub_colored,
-		master_fingerprint,
-		reuse_addresses,
-	) = _get_wallet_data(ldk_data_dir, kv_store);
+	let (data_dir, bitcoin_network, account_xpub_vanilla, account_xpub_colored, master_fingerprint, reuse_addresses) =
+		_get_wallet_data(ldk_data_dir, kv_store);
 	let indexer_url = _get_indexer_url(kv_store);
 	tokio::task::spawn_blocking(move || {
 		let mut wallet = _new_rgb_wallet(
@@ -447,7 +409,10 @@ where
 			rgb_payment_info
 		};
 
-		if kv_store.read(RGB_PRIMARY_NS, namespace, &htlc_proxy_id_pending).is_err() {
+		if kv_store
+			.read(RGB_PRIMARY_NS, namespace, &htlc_proxy_id_pending)
+			.is_err()
+		{
 			let data = bincode::serialize(&rgb_payment_info).expect("valid rgb payment info");
 			kv_store
 				.write(RGB_PRIMARY_NS, namespace, &htlc_proxy_id_pending, data)
@@ -507,12 +472,10 @@ where
 	};
 	let psbt = Psbt::from_unsigned_tx(commitment_tx.clone()).unwrap();
 	let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
-	let wallet = _get_rgb_wallet_online_blocking(ldk_data_dir, kv_store).map_err(|e| {
-		ChannelError::close(format!("RGB wallet go_online for commitment coloring: {e}"))
-	})?;
-	let (fascia, _) = wallet
-		.color_psbt(&mut psbt, coloring_info)
-		.map_err(|e| ChannelError::close(format!("RGB color_psbt (commitment): {e}")))?;
+	let handle = Handle::current();
+	let _ = handle.enter();
+	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
+	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
 	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
 	let modified_tx = match psbt.extract_tx() {
 		Ok(tx) => tx,
@@ -523,9 +486,7 @@ where
 	let txid = modified_tx.compute_txid();
 	commitment_transaction.built = BuiltCommitmentTransaction { transaction: modified_tx, txid };
 
-	wallet
-		.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored))
-		.map_err(|e| ChannelError::close(format!("RGB consume_fascia (commitment): {e}")))?;
+	wallet.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored)).unwrap();
 
 	let rgb_amount = if counterparty {
 		vout_p2wpkh_amt + rgb_offered_htlc
@@ -565,11 +526,10 @@ pub(crate) fn color_htlc(
 	};
 	let psbt = Psbt::from_unsigned_tx(htlc_tx.clone()).unwrap();
 	let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
-	let wallet = _get_rgb_wallet_online_blocking(ldk_data_dir, kv_store)
-		.map_err(|e| ChannelError::close(format!("RGB wallet go_online for HTLC coloring: {e}")))?;
-	let (fascia, _) = wallet
-		.color_psbt(&mut psbt, coloring_info)
-		.map_err(|e| ChannelError::close(format!("RGB color_psbt (htlc): {e}")))?;
+	let handle = Handle::current();
+	let _ = handle.enter();
+	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
+	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
 	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
 	let modified_tx = match psbt.extract_tx() {
 		Ok(tx) => tx,
@@ -578,9 +538,7 @@ pub(crate) fn color_htlc(
 	};
 	let txid = &modified_tx.compute_txid();
 
-	wallet
-		.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored))
-		.map_err(|e| ChannelError::close(format!("RGB consume_fascia (htlc): {e}")))?;
+	wallet.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored)).unwrap();
 
 	let transfer_info = TransferInfo { contract_id, rgb_amount: htlc_amount_rgb };
 	kv_store.write_rgb_transfer_info(&txid.to_string(), &transfer_info);
@@ -630,12 +588,10 @@ pub(crate) fn color_closing(
 	};
 	let psbt = Psbt::from_unsigned_tx(closing_tx.clone()).unwrap();
 	let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
-	let wallet = _get_rgb_wallet_online_blocking(ldk_data_dir, kv_store).map_err(|e| {
-		ChannelError::close(format!("RGB wallet go_online for closing coloring: {e}"))
-	})?;
-	let (fascia, _) = wallet
-		.color_psbt(&mut psbt, coloring_info)
-		.map_err(|e| ChannelError::close(format!("RGB color_psbt (closing): {e}")))?;
+	let handle = Handle::current();
+	let _ = handle.enter();
+	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
+	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
 	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
 	let modified_tx = match psbt.extract_tx() {
 		Ok(tx) => tx,
@@ -646,9 +602,7 @@ pub(crate) fn color_closing(
 	let txid = &modified_tx.compute_txid();
 	closing_transaction.built = modified_tx;
 
-	wallet
-		.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored))
-		.map_err(|e| ChannelError::close(format!("RGB consume_fascia (closing): {e}")))?;
+	wallet.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored)).unwrap();
 
 	let transfer_info = TransferInfo { contract_id, rgb_amount: holder_vout_amount };
 	kv_store.write_rgb_transfer_info(&txid.to_string(), &transfer_info);
@@ -851,19 +805,22 @@ pub trait RgbKvStoreExt {
 	/// whether the payment is colored
 	fn is_payment_rgb(&self, payment_hash: &PaymentHash) -> bool;
 	/// filter first hops to only include channels with sufficient RGB assets
-	fn filter_first_hops(&self, payment_hash: &PaymentHash, first_hops: &mut Vec<ChannelDetails>);
+	fn filter_first_hops(
+		&self, payment_hash: &PaymentHash, first_hops: &mut Vec<ChannelDetails>,
+	);
 }
 
 impl<K: KVStoreSync + ?Sized> RgbKvStoreExt for K {
 	fn read_rgb_transfer_info(&self, txid: &str) -> TransferInfo {
-		let data =
-			self.read(RGB_PRIMARY_NS, RGB_TRANSFER_INFO_NS, txid).expect("KVStore read failed");
+		let data = self.read(RGB_PRIMARY_NS, RGB_TRANSFER_INFO_NS, txid)
+			.expect("KVStore read failed");
 		bincode::deserialize(&data).expect("valid transfer info")
 	}
 
 	fn write_rgb_transfer_info(&self, txid: &str, info: &TransferInfo) {
 		let data = bincode::serialize(info).expect("valid transfer info");
-		self.write(RGB_PRIMARY_NS, RGB_TRANSFER_INFO_NS, txid, data).expect("KVStore write failed");
+		self.write(RGB_PRIMARY_NS, RGB_TRANSFER_INFO_NS, txid, data)
+			.expect("KVStore write failed");
 	}
 
 	fn read_rgb_channel_info(&self, channel_id: &str, pending: bool) -> Result<RgbInfo, io::Error> {
@@ -875,7 +832,8 @@ impl<K: KVStoreSync + ?Sized> RgbKvStoreExt for K {
 	fn write_rgb_channel_info(&self, channel_id: &str, rgb_info: &RgbInfo, pending: bool) {
 		let namespace = if pending { RGB_CHANNEL_INFO_PENDING_NS } else { RGB_CHANNEL_INFO_NS };
 		let data = bincode::serialize(rgb_info).expect("valid rgb channel info");
-		self.write(RGB_PRIMARY_NS, namespace, channel_id, data).expect("KVStore write failed");
+		self.write(RGB_PRIMARY_NS, namespace, channel_id, data)
+			.expect("KVStore write failed");
 	}
 
 	fn read_rgb_payment_info(
@@ -893,7 +851,8 @@ impl<K: KVStoreSync + ?Sized> RgbKvStoreExt for K {
 			if info.inbound { RGB_PAYMENT_INFO_INBOUND_NS } else { RGB_PAYMENT_INFO_OUTBOUND_NS };
 		let key = payment_hash.0.as_hex().to_string();
 		let data = bincode::serialize(info).expect("valid rgb payment info");
-		self.write(RGB_PRIMARY_NS, namespace, &key, data).expect("KVStore write failed");
+		self.write(RGB_PRIMARY_NS, namespace, &key, data)
+			.expect("KVStore write failed");
 	}
 
 	fn read_rgb_consignment(&self, id: &str) -> Result<Vec<u8>, io::Error> {
@@ -901,7 +860,8 @@ impl<K: KVStoreSync + ?Sized> RgbKvStoreExt for K {
 	}
 
 	fn write_rgb_consignment(&self, id: &str, data: Vec<u8>) {
-		self.write(RGB_PRIMARY_NS, RGB_CONSIGNMENT_NS, id, data).expect("KVStore write failed");
+		self.write(RGB_PRIMARY_NS, RGB_CONSIGNMENT_NS, id, data)
+			.expect("KVStore write failed");
 	}
 
 	fn remove_rgb_channel_info(&self, channel_id: &str, pending: bool) -> Result<(), io::Error> {
@@ -910,7 +870,8 @@ impl<K: KVStoreSync + ?Sized> RgbKvStoreExt for K {
 	}
 
 	fn remove_rgb_consignment(&self, id: &str) {
-		self.remove(RGB_PRIMARY_NS, RGB_CONSIGNMENT_NS, id, false).expect("KVStore remove failed");
+		self.remove(RGB_PRIMARY_NS, RGB_CONSIGNMENT_NS, id, false)
+			.expect("KVStore remove failed");
 	}
 
 	fn read_config(&self, key: &str) -> Result<String, io::Error> {

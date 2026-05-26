@@ -3230,13 +3230,7 @@ where
 			holder_commitment_point.next_transaction_number(), &holder_commitment_point.next_point(),
 			true, false, logger);
 		if self.context().is_colored() {
-			color_commitment(
-				&self.context(),
-				&self.funding(),
-				&mut commitment_data.tx,
-				false,
-			)
-			.expect("successful commitment coloring");
+			color_commitment(&self.context(), &self.funding(), &mut commitment_data.tx, false).expect("successful commitment coloring");
 		}
 		let initial_commitment_tx = commitment_data.tx;
 		let trusted_tx = initial_commitment_tx.trust();
@@ -3280,8 +3274,7 @@ where
 			context.counterparty_next_commitment_transaction_number,
 			&context.counterparty_next_commitment_point.unwrap(), false, false, logger);
 		if self.context().is_colored() {
-			color_commitment(&self.context(), &self.funding(), &mut commitment_data.tx, true)
-				.unwrap();
+			color_commitment(&self.context(), &self.funding(), &mut commitment_data.tx, true).unwrap();
 		}
 		let counterparty_initial_commitment_tx = commitment_data.tx;
 		let counterparty_trusted_tx = counterparty_initial_commitment_tx.trust();
@@ -5122,13 +5115,8 @@ where
 			logger,
 		);
 		if self.is_colored() {
-			color_commitment(
-				&self,
-				&funding,
-				&mut commitment_data.tx,
-				false,
-			)
-			.expect("successful commitment coloring");
+			color_commitment(&self, &funding, &mut commitment_data.tx, false)
+				.expect("successful commitment coloring");
 		}
 		let commitment_txid = {
 			let trusted_tx = commitment_data.tx.trust();
@@ -5552,8 +5540,6 @@ where
 				assert_eq!(predicted_fee_sat, stats.commit_tx_fee_sat);
 			}
 		}
-		#[cfg(not(any(test, fuzzing, debug_assertions)))]
-		let _ = stats;
 		#[cfg(debug_assertions)]
 		{
 			// Make sure that the to_self/to_remote is always either past the appropriate
@@ -9774,8 +9760,7 @@ where
 				self.context.counterparty_next_commitment_transaction_number + 1,
 				&self.context.counterparty_next_commitment_point.unwrap(), false, false, logger);
 			if self.context.is_colored() {
-				color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true)
-					.expect("successful commitment coloring");
+				color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true).expect("successful commitment coloring");
 			}
 			let counterparty_initial_commitment_tx = commitment_data.tx;
 			self.context.get_funding_signed_msg(&self.funding.channel_transaction_parameters, logger, counterparty_initial_commitment_tx)
@@ -13098,8 +13083,7 @@ where
 			&self.context.counterparty_next_commitment_point.unwrap(), false, true, logger,
 		);
 		if self.context.is_colored() {
-			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true)
-				.expect("successful commitment coloring");
+			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true).expect("successful commitment coloring");
 		}
 		let counterparty_commitment_tx = commitment_data.tx;
 
@@ -13742,8 +13726,7 @@ where
 			self.context.counterparty_next_commitment_transaction_number,
 			&self.context.counterparty_next_commitment_point.unwrap(), false, false, logger);
 		if self.context.is_colored() {
-			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true)
-				.unwrap();
+			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true).unwrap();
 		}
 		let counterparty_initial_commitment_tx = commitment_data.tx;
 		let signature = match &self.context.holder_signer {
