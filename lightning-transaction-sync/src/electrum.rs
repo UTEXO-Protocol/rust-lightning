@@ -290,11 +290,21 @@ where
 					}
 
 					watched_txs.push((txid, tx.clone()));
-					if let Some(tx_out) = tx.output.first() {
-						// We watch an arbitrary output of the transaction of interest in order to
-						// retrieve the associated script history, before narrowing down our search
-						// through `filter`ing by `txid` below.
-						watched_script_pubkeys.push(tx_out.script_pubkey.clone());
+					// We watch an output of the transaction of interest in order to retrieve the
+					// associated script history, before narrowing down our search through
+					// `filter`ing by `txid` below. We skip OP_RETURN outputs as Electrum servers
+					// don't index provably-unspendable scripts (e.g. the RGB commitment at vout 0
+					// of a colored funding tx), so their history is empty and the tx would never
+					// be seen as confirmed. We fall back to the first output to keep this lookup
+					// aligned with `watched_txs`.
+					let script_pubkey = tx
+						.output
+						.iter()
+						.find(|o| !o.script_pubkey.is_op_return())
+						.or_else(|| tx.output.first())
+						.map(|o| o.script_pubkey.clone());
+					if let Some(script_pubkey) = script_pubkey {
+						watched_script_pubkeys.push(script_pubkey);
 					} else {
 						debug_assert!(false, "Failed due to retrieving invalid tx data.");
 						log_error!(self.logger, "Failed due to retrieving invalid tx data.");
