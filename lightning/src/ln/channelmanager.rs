@@ -4162,7 +4162,7 @@ where
 	/// [`Event::FundingGenerationReady::temporary_channel_id`]: events::Event::FundingGenerationReady::temporary_channel_id
 	/// [`Event::ChannelClosed::channel_id`]: events::Event::ChannelClosed::channel_id
 	#[rustfmt::skip]
-	pub fn create_channel(&self, their_network_key: PublicKey, channel_value_satoshis: u64, push_msat: u64, user_channel_id: u128, temporary_channel_id: Option<ChannelId>, override_config: Option<UserConfig>, consignment_endpoint: Option<RgbTransport>, push_asset_amount: Option<u64>) -> Result<ChannelId, APIError> {
+	pub fn create_channel(&self, their_network_key: PublicKey, channel_value_satoshis: u64, push_msat: u64, user_channel_id: u128, temporary_channel_id: Option<ChannelId>, override_config: Option<UserConfig>, consignment_endpoint: Option<RgbTransport>, push_asset_amount: Option<u64>, is_virtual: bool) -> Result<ChannelId, APIError> {
 		if channel_value_satoshis < 1000 {
 			return Err(APIError::APIMisuseError { err: format!("Channel value must be at least 1000 satoshis. It was {}", channel_value_satoshis) });
 		}
@@ -4208,6 +4208,9 @@ where
 				},
 			}
 		};
+		if is_virtual {
+			channel.context.set_virtual_dust_limit();
+		}
 		let logger = WithChannelContext::from(&self.logger, &channel.context, None);
 		let res = channel.get_open_channel(self.chain_hash, &&logger);
 
@@ -10218,7 +10221,8 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						InboundV1Channel::new(
 							&self.fee_estimator, &self.entropy_source, &self.signer_provider, *counterparty_node_id,
 							&self.channel_type_features(), &peer_state.latest_features, &open_channel_msg,
-							user_channel_id, &config, best_block_height, &self.logger, accept_0conf, self.ldk_data_dir.clone(),
+							user_channel_id, &config, best_block_height, &self.logger, accept_0conf,
+							channel_funding_type == ChannelFundingType::Virtual, self.ldk_data_dir.clone(),
 							Arc::clone(&self.rgb_kv_store),
 						).map_err(|err| MsgHandleErrInternal::from_chan_no_close(err, *temporary_channel_id)
 						).map(|mut channel| {
@@ -10513,7 +10517,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				let mut channel = InboundV1Channel::new(
 					&self.fee_estimator, &self.entropy_source, &self.signer_provider, *counterparty_node_id,
 					&self.channel_type_features(), &peer_state.latest_features, msg, user_channel_id,
-					&self.config.read().unwrap(), best_block_height, &self.logger, /*is_0conf=*/false, self.ldk_data_dir.clone(),
+					&self.config.read().unwrap(), best_block_height, &self.logger, /*is_0conf=*/false, false, self.ldk_data_dir.clone(),
 					Arc::clone(&self.rgb_kv_store),
 				).map_err(|e| MsgHandleErrInternal::from_chan_no_close(e, msg.common_fields.temporary_channel_id))?;
 				let logger = WithChannelContext::from(&self.logger, &channel.context, None);
