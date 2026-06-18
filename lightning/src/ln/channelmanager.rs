@@ -2124,7 +2124,7 @@ where
 /// # let channel_manager = channel_manager.get_cm();
 /// let value_sats = 1_000_000;
 /// let push_msats = 10_000_000;
-/// match channel_manager.create_channel(peer_id, value_sats, push_msats, 42, None, None) {
+/// match channel_manager.create_channel(peer_id, value_sats, push_msats, 42, None, None, None, None, false) {
 ///     Ok(channel_id) => println!("Opening channel {}", channel_id),
 ///     Err(e) => println!("Error opening channel: {:?}", e),
 /// }
@@ -6302,6 +6302,12 @@ where
 						err: format!("Channel {temporary_channel_id} with counterparty {counterparty_node_id} is not an unfunded, outbound channel ready to fund"),
 					});
 				}
+				if chan.get().context().is_virtual_dust_set() && !is_trusted_no_broadcast {
+					return Err(APIError::APIMisuseError {
+						err: "Channels opened with virtual dust must be completed with ChannelFundingType::Virtual"
+							.to_owned(),
+					});
+				}
 				if is_trusted_no_broadcast && chan.get().minimum_depth() != Some(0) {
 					return Err(APIError::APIMisuseError {
 						err: "ChannelFundingType::Virtual requires a negotiated 0-conf channel"
@@ -10208,6 +10214,15 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 		let mut peer_state_lock = peer_state_mutex.lock().unwrap();
 		let peer_state = &mut *peer_state_lock;
 		let is_only_peer_channel = peer_state.total_channel_count() == 1;
+		if channel_funding_type == ChannelFundingType::Virtual {
+			if let Some(unaccepted_channel) = peer_state.inbound_channel_request_by_id.get(temporary_channel_id) {
+				if matches!(unaccepted_channel.open_channel_msg, OpenChannelMessage::V2(_)) {
+					return Err(APIError::APIMisuseError {
+						err: "ChannelFundingType::Virtual is not supported for inbound v2 channels".to_owned(),
+					});
+				}
+			}
+		}
 
 		// Find (and remove) the channel in the unaccepted table. If it's not there, something weird is
 		// happening and return an error. N.B. that we create channel with an outbound SCID of zero so
