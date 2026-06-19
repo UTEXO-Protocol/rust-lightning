@@ -54,7 +54,7 @@ inventory = { version = "0.3", optional = true  }
 # RGB and related
 bincode = "1.3"
 futures = "0.3"
-rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", branch = "dev", features = [
+rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", tag = "v0.3.0-beta.24", features = [
     "electrum",
     "esplora",
 ] }
