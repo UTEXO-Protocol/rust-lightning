@@ -451,7 +451,7 @@ impl Retry {
 #[rustfmt::skip]
 pub(super) fn has_expired(route_params: &RouteParameters) -> bool {
 	if let Some(expiry_time) = route_params.payment_params.expiry_time {
-		if let Ok(elapsed) = web_time::SystemTime::UNIX_EPOCH.elapsed() {
+		if let Ok(elapsed) = std::time::SystemTime::UNIX_EPOCH.elapsed() {
 			return elapsed > core::time::Duration::from_secs(expiry_time)
 		}
 	}
@@ -2982,7 +2982,7 @@ mod tests {
 		let secp_ctx = Secp256k1::new();
 		let keys_manager = test_utils::TestKeysInterface::new(&[0; 32], Network::Testnet);
 
-		let past_expiry_time = web_time::SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs() - 2;
+		let past_expiry_time = std::time::SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs() - 2;
 		let payment_params = PaymentParameters::from_node_id(
 				PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[42; 32]).unwrap()),
 				0

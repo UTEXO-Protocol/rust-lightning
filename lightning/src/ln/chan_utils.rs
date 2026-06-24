@@ -11,6 +11,7 @@
 //! largely of interest for those implementing the traits on [`crate::sign`] by hand.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use bitcoin::amount::Amount;
 use bitcoin::constants::WITNESS_SCALE_FACTOR;
@@ -33,7 +34,7 @@ use crate::chain::chaininterface::{
 };
 use crate::chain::package::WEIGHT_REVOKED_OUTPUT;
 use crate::ln::msgs::DecodeError;
-use crate::rgb_utils::{color_htlc, is_tx_colored, RgbBackend};
+use crate::rgb_utils::{color_htlc, is_tx_colored};
 use crate::sign::EntropySource;
 use crate::types::payment::{PaymentHash, PaymentPreimage};
 use crate::util::persist::KVStoreSync;
@@ -46,7 +47,7 @@ use bitcoin::secp256k1::{ecdsa::Signature, Message, Secp256k1};
 use bitcoin::secp256k1::{PublicKey, Scalar, SecretKey};
 use bitcoin::{secp256k1, Sequence, Witness};
 
-use crate::rgb_utils::ContractId;
+use rgb_lib::ContractId;
 
 use super::channel_keys::{
 	DelayedPaymentBasepoint, DelayedPaymentKey, HtlcBasepoint, HtlcKey, RevocationBasepoint,
@@ -2246,7 +2247,7 @@ impl<'a> TrustedCommitmentTransaction<'a> {
 	#[rustfmt::skip]
 	pub fn get_htlc_sigs<T: secp256k1::Signing, ES: Deref>(
 		&self, htlc_base_key: &SecretKey, channel_parameters: &DirectedChannelTransactionParameters,
-		entropy_source: &ES, secp_ctx: &Secp256k1<T>, rgb_backend: &RgbBackend,
+		entropy_source: &ES, secp_ctx: &Secp256k1<T>, ldk_data_dir: &PathBuf,
 		rgb_kv_store: &dyn KVStoreSync,
 	) -> Result<Vec<Signature>, ()> where ES::Target: EntropySource {
 		let inner = self.inner;
@@ -2259,10 +2260,7 @@ impl<'a> TrustedCommitmentTransaction<'a> {
 			assert!(this_htlc.transaction_output_index.is_some());
 			let mut htlc_tx = build_htlc_transaction(&txid, inner.feerate_per_kw, channel_parameters.contest_delay(), &this_htlc, &self.channel_type_features, &keys.broadcaster_delayed_payment_key, &keys.revocation_key);
 			if inner.is_colored() {
-				if let Err(_e) = color_htlc(&mut htlc_tx, this_htlc, rgb_backend, rgb_kv_store) {
-					return Err(());
-				}
-				if !rgb_backend.is_transaction_durable(&htlc_tx.compute_txid(), rgb_kv_store) {
+				if let Err(_e) = color_htlc(&mut htlc_tx, this_htlc, ldk_data_dir, rgb_kv_store) {
 					return Err(());
 				}
 			}

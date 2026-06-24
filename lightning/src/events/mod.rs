@@ -16,7 +16,7 @@
 
 pub mod bump_transaction;
 
-use crate::rgb_utils::ContractId;
+use rgb_lib::ContractId;
 
 pub use bump_transaction::BumpTransactionEvent;
 
@@ -34,7 +34,6 @@ use crate::offers::invoice::Bolt12Invoice;
 use crate::offers::invoice_request::InvoiceRequest;
 use crate::offers::static_invoice::StaticInvoice;
 use crate::onion_message::messenger::Responder;
-use crate::rgb_utils::RgbTransport;
 use crate::routing::gossip::NetworkUpdate;
 use crate::routing::router::{BlindedTail, Path, RouteHop, RouteParameters};
 use crate::sign::SpendableOutputDescriptor;
@@ -786,35 +785,6 @@ pub enum Event {
 		/// [`UserConfig::manually_accept_inbound_channels`]: crate::util::config::UserConfig::manually_accept_inbound_channels
 		user_channel_id: u128,
 	},
-	/// Requests asynchronous validation of an incoming RGB funding transfer.
-	///
-	/// Call [`ChannelManager::process_pending_rgb_funding_validation`] to validate the transfer
-	/// using the injected production RGB backend and finish processing `funding_created`, or call
-	/// [`ChannelManager::reject_pending_rgb_funding_validation`] to reject the pending channel.
-	///
-	/// [`ChannelManager::process_pending_rgb_funding_validation`]: crate::ln::channelmanager::ChannelManager::process_pending_rgb_funding_validation
-	/// [`ChannelManager::reject_pending_rgb_funding_validation`]: crate::ln::channelmanager::ChannelManager::reject_pending_rgb_funding_validation
-	RgbFundingValidationRequired {
-		/// Temporary channel ID awaiting RGB funding validation.
-		temporary_channel_id: ChannelId,
-		/// Node that sent the funding message.
-		counterparty_node_id: PublicKey,
-		/// Funding transaction ID used to retrieve the consignment.
-		funding_txid: bitcoin::Txid,
-		/// Funding output index whose RGB assignment must be validated.
-		funding_output_index: u16,
-		/// Endpoint from which the RGB consignment must be retrieved.
-		consignment_endpoint: RgbTransport,
-	},
-	/// Indicates that prepared RGB transactions are waiting for durable fascia consumption.
-	///
-	/// Call [`ChannelManager::process_pending_rgb_transactions`] before expecting blocked
-	/// commitment, HTLC, funding, or cooperative-close signatures and messages to resume.
-	///
-	/// This event is regenerated from the persisted RGB KVStore records after reload.
-	///
-	/// [`ChannelManager::process_pending_rgb_transactions`]: crate::ln::channelmanager::ChannelManager::process_pending_rgb_transactions
-	RgbTransactionPersistenceRequired,
 	/// Used to indicate that the counterparty node has provided the signature(s) required to
 	/// recover our funds in case they go offline.
 	///
@@ -1933,14 +1903,6 @@ impl Writeable for Event {
 				// We never write out FundingGenerationReady events as, upon disconnection, peers
 				// drop any channels which have not yet exchanged funding_signed.
 			},
-			&Event::RgbFundingValidationRequired { .. } => {
-				55u8.write(writer)?;
-				// Regenerated from ChannelManager's persisted pending validation records.
-			},
-			&Event::RgbTransactionPersistenceRequired => {
-				57u8.write(writer)?;
-				// Regenerated from persisted pending fascia records.
-			},
 			&Event::PaymentClaimable {
 				ref payment_hash,
 				ref amount_msat,
@@ -2442,10 +2404,6 @@ impl MaybeReadable for Event {
 		match Readable::read(reader)? {
 			// Note that we do not write a length-prefixed TLV for FundingGenerationReady events.
 			0u8 => Ok(None),
-			// Regenerated from ChannelManager's persisted pending validation records.
-			55u8 => Ok(None),
-			// Regenerated from the RGB KVStore's pending fascia records.
-			57u8 => Ok(None),
 			1u8 => {
 				let mut f = || {
 					let mut payment_hash = PaymentHash([0; 32]);

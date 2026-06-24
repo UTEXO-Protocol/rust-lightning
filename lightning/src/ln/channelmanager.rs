@@ -17,6 +17,8 @@
 //! on-chain transactions (it only monitors the chain to watch for any force-closes that might
 //! imply it needs to fail HTLCs/payments/channels it manages).
 
+use std::path::PathBuf;
+
 use bitcoin::block::Header;
 use bitcoin::constants::ChainHash;
 use bitcoin::key::constants::SECRET_KEY_SIZE;
@@ -32,9 +34,9 @@ use bitcoin::hex::DisplayHex;
 
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::secp256k1::{PublicKey, SecretKey};
-use bitcoin::{secp256k1, ScriptBuf, Sequence, SignedAmount};
+use bitcoin::{secp256k1, Sequence, SignedAmount};
 
-use crate::rgb_utils::{ContractId, RgbTransport};
+use rgb_lib::{ContractId, RgbTransport};
 
 use crate::blinded_path::message::{
 	AsyncPaymentsContext, BlindedMessagePath, MessageForwardNode, OffersContext,
@@ -117,10 +119,7 @@ use crate::onion_message::messenger::{
 	MessageRouter, MessageSendInstructions, Responder, ResponseInstruction,
 };
 use crate::onion_message::offers::{OffersMessage, OffersMessageHandler};
-use crate::rgb_utils::{
-	is_channel_rgb, persist_funding_validation, RgbBackend, RgbBackendError, RgbFundingValidation,
-	RgbKvStoreExt,
-};
+use crate::rgb_utils::{handle_funding, is_channel_rgb, RgbKvStoreExt};
 use crate::routing::router::{
 	BlindedTail, FixedRouter, InFlightHtlcs, Path, Payee, PaymentParameters, Route,
 	RouteParameters, RouteParametersConfig, Router,
@@ -140,8 +139,8 @@ use crate::util::logger::{Level, Logger, WithContext};
 use crate::util::persist::KVStoreSync;
 use crate::util::scid_utils::fake_scid;
 use crate::util::ser::{
-	BigSize, FixedLengthReader, LengthReadable, MaybeReadable, Readable, ReadableArgs,
-	RequiredWrapper, VecWriter, WithoutLength, Writeable, Writer,
+	BigSize, FixedLengthReader, LengthReadable, MaybeReadable, Readable, ReadableArgs, VecWriter,
+	WithoutLength, Writeable, Writer,
 };
 use crate::util::wakers::{Future, Notifier};
 
@@ -1770,64 +1769,6 @@ struct PendingInboundPayment {
 	min_value_msat: Option<u64>,
 }
 
-#[derive(Clone)]
-struct PendingRgbFundingValidation {
-	counterparty_node_id: PublicKey,
-	funding_created: msgs::FundingCreated,
-	consignment_endpoint: RgbTransport,
-	push_asset_amount: Option<u64>,
-	open_channel_msg: msgs::OpenChannel,
-	user_channel_id: u128,
-	their_features: InitFeatures,
-	is_0conf: bool,
-	is_manual_broadcast: bool,
-	is_trusted_no_broadcast: bool,
-	validated_funding: Option<Vec<u8>>,
-	/// P2WSH output script of the funding output, used to derive the P2V recipient_id for the RGB
-	/// proxy lookup. Stored as `Option` for backward compatibility with persisted states written
-	/// before this field was added.
-	funding_output_script: Option<ScriptBuf>,
-}
-
-impl_writeable_tlv_based!(PendingRgbFundingValidation, {
-	(0, counterparty_node_id, required),
-	(2, funding_created, required),
-	(4, consignment_endpoint, required),
-	(6, push_asset_amount, option),
-	(8, open_channel_msg, required),
-	(10, user_channel_id, required),
-	(12, their_features, required),
-	(14, is_0conf, required),
-	(16, is_manual_broadcast, required),
-	(18, is_trusted_no_broadcast, required),
-	(20, validated_funding, required),
-	(22, funding_output_script, option),
-});
-
-struct ActiveRgbFundingValidationGuard<'a> {
-	active: &'a Mutex<HashSet<ChannelId>>,
-	temporary_channel_id: ChannelId,
-}
-
-impl<'a> ActiveRgbFundingValidationGuard<'a> {
-	fn acquire(
-		active: &'a Mutex<HashSet<ChannelId>>, temporary_channel_id: ChannelId,
-	) -> Result<Self, APIError> {
-		if !active.lock().unwrap().insert(temporary_channel_id) {
-			return Err(APIError::APIMisuseError {
-				err: format!("RGB funding validation already active for {temporary_channel_id}"),
-			});
-		}
-		Ok(Self { active, temporary_channel_id })
-	}
-}
-
-impl Drop for ActiveRgbFundingValidationGuard<'_> {
-	fn drop(&mut self) {
-		self.active.lock().unwrap().remove(&self.temporary_channel_id);
-	}
-}
-
 /// [`SimpleArcChannelManager`] is useful when you need a [`ChannelManager`] with a static lifetime, e.g.
 /// when you're using `lightning-net-tokio` (since `tokio::spawn` requires parameters with static
 /// lifetimes). Other times you can afford a reference, which is more efficient, in which case
@@ -2079,7 +2020,7 @@ where
 /// #     best_block: lightning::chain::BestBlock,
 /// #     current_timestamp: u32,
 /// #     mut reader: R,
-/// #     rgb_backend: std::sync::Arc<lightning::rgb_utils::RgbBackend>,
+/// #     ldk_data_dir: std::path::PathBuf,
 /// #     rgb_kv_store: std::sync::Arc<dyn lightning::util::persist::KVStoreSync + Send + Sync>,
 /// # ) -> Result<(), lightning::ln::msgs::DecodeError> {
 /// // Fresh start with no channels
@@ -2091,7 +2032,7 @@ where
 /// let channel_manager = ChannelManager::new(
 ///     fee_estimator, chain_monitor, tx_broadcaster, router, message_router, logger,
 ///     entropy_source, node_signer, signer_provider, config.clone(), params, current_timestamp,
-///     rgb_backend.clone(), rgb_kv_store.clone(),
+///     ldk_data_dir, rgb_kv_store,
 /// );
 ///
 /// // Restart from deserialized data
@@ -2099,7 +2040,7 @@ where
 /// let args = ChannelManagerReadArgs::new(
 ///     entropy_source, node_signer, signer_provider, fee_estimator, chain_monitor, tx_broadcaster,
 ///     router, message_router, logger, config, channel_monitors.iter().collect(),
-///     rgb_backend, rgb_kv_store,
+///     ldk_data_dir, rgb_kv_store,
 /// );
 /// let (block_hash, channel_manager) =
 ///     <(BlockHash, ChannelManager<_, _, _, _, _, _, _, _, _>)>::read(&mut reader, args)?;
@@ -3037,15 +2978,10 @@ pub struct ChannelManager<
 
 	logger: L,
 
-	rgb_backend: Arc<RgbBackend>,
+	ldk_data_dir: PathBuf,
 
 	/// KVStore for RGB data persistence
 	rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
-
-	/// Incoming RGB funding messages waiting for asynchronous backend validation.
-	pending_rgb_funding_validations: Mutex<HashMap<ChannelId, PendingRgbFundingValidation>>,
-	/// Guards against concurrent processing of the same pending RGB funding validation.
-	active_rgb_funding_validations: Mutex<HashSet<ChannelId>>,
 }
 
 /// Chain-related parameters used to construct a new `ChannelManager`.
@@ -4069,7 +4005,7 @@ where
 	pub fn new(
 		fee_est: F, chain_monitor: M, tx_broadcaster: T, router: R, message_router: MR, logger: L,
 		entropy_source: ES, node_signer: NS, signer_provider: SP, config: UserConfig,
-		params: ChainParameters, current_timestamp: u32, rgb_backend: Arc<RgbBackend>,
+		params: ChainParameters, current_timestamp: u32, ldk_data_dir: PathBuf,
 		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Self
 	where
@@ -4142,10 +4078,8 @@ where
 			#[cfg(feature = "_test_utils")]
 			testing_dnssec_proof_offer_resolution_override: Mutex::new(new_hash_map()),
 
-			rgb_backend,
+			ldk_data_dir,
 			rgb_kv_store,
-			pending_rgb_funding_validations: Mutex::new(new_hash_map()),
-			active_rgb_funding_validations: Mutex::new(new_hash_set()),
 		}
 	}
 
@@ -4159,242 +4093,6 @@ where
 	/// default configuration applied to all new channels.
 	pub fn set_current_config(&self, new_config: UserConfig) {
 		*self.config.write().unwrap() = new_config;
-	}
-
-	/// Returns the production RGB backend injected into this channel manager.
-	pub fn rgb_backend(&self) -> &Arc<RgbBackend> {
-		&self.rgb_backend
-	}
-
-	/// Completes an asynchronous incoming RGB funding validation.
-	///
-	/// A successful result is persisted before `funding_created` processing continues and before
-	/// any `funding_signed` message can be queued.
-	fn complete_rgb_funding_validation(
-		&self, temporary_channel_id: ChannelId,
-		validation_result: Result<RgbFundingValidation, RgbBackendError>,
-	) -> Result<(), APIError> {
-		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
-		let pending = self
-			.pending_rgb_funding_validations
-			.lock()
-			.unwrap()
-			.get(&temporary_channel_id)
-			.cloned()
-			.ok_or_else(|| APIError::APIMisuseError {
-				err: format!("No pending RGB funding validation for {temporary_channel_id}"),
-			})?;
-		let validation = match validation_result {
-			Ok(validation) => validation,
-			Err(error) => {
-				if matches!(
-					error,
-					RgbBackendError::InvalidConsignment
-						| RgbBackendError::UnknownSchema(_)
-						| RgbBackendError::UnsupportedSchema(_)
-				) {
-					let reason = format!("RGB funding validation rejected: {error:?}");
-					self.reject_pending_rgb_funding_validation_internal(
-						temporary_channel_id,
-						&pending.counterparty_node_id,
-						reason.clone(),
-					)?;
-					return Err(APIError::ChannelUnavailable { err: reason });
-				}
-				return Err(APIError::ChannelUnavailable {
-					err: format!("RGB funding validation failed and remains pending: {error:?}"),
-				});
-			},
-		};
-		if let Err(error) = persist_funding_validation(
-			&temporary_channel_id,
-			&pending.funding_created.funding_txid.to_string(),
-			validation,
-			pending.push_asset_amount,
-			self.rgb_kv_store.as_ref(),
-		) {
-			if matches!(error, ChannelError::Close(_)) {
-				let reason = format!("RGB funding validation rejected: {error:?}");
-				self.reject_pending_rgb_funding_validation_internal(
-					temporary_channel_id,
-					&pending.counterparty_node_id,
-					reason.clone(),
-				)?;
-				return Err(APIError::ChannelUnavailable { err: reason });
-			}
-			return Err(APIError::ChannelUnavailable {
-				err: format!(
-					"Failed to persist RGB funding validation; validation remains pending: {error:?}"
-				),
-			});
-		}
-		if self
-			.internal_funding_created_with_rgb_validation(
-				&pending.counterparty_node_id,
-				&pending.funding_created,
-				true,
-			)
-			.is_err()
-		{
-			self.pending_rgb_funding_validations.lock().unwrap().remove(&temporary_channel_id);
-			return Err(APIError::ChannelUnavailable {
-				err: "Failed to finish processing RGB funding validation; pending validation was removed"
-					.to_owned(),
-			});
-		}
-		self.pending_rgb_funding_validations.lock().unwrap().remove(&temporary_channel_id);
-		Ok(())
-	}
-
-	fn cache_rgb_funding_validation(
-		&self, temporary_channel_id: ChannelId, validation: &RgbFundingValidation,
-	) -> Result<(), APIError> {
-		let validation =
-			bincode::serialize(validation).map_err(|error| APIError::ChannelUnavailable {
-				err: format!("Failed to serialize RGB funding validation: {error}"),
-			})?;
-		let mut pending = self.pending_rgb_funding_validations.lock().unwrap();
-		let pending =
-			pending.get_mut(&temporary_channel_id).ok_or_else(|| APIError::APIMisuseError {
-				err: format!("No pending RGB funding validation for {temporary_channel_id}"),
-			})?;
-		pending.validated_funding = Some(validation);
-		Ok(())
-	}
-
-	fn reject_pending_rgb_funding_validation_internal(
-		&self, temporary_channel_id: ChannelId, counterparty_node_id: &PublicKey, reason: String,
-	) -> Result<(), APIError> {
-		self.force_close_sending_error(&temporary_channel_id, counterparty_node_id, reason)?;
-		self.pending_rgb_funding_validations.lock().unwrap().remove(&temporary_channel_id);
-		Ok(())
-	}
-
-	/// Runs the injected production RGB backend for a pending funding validation and completes it.
-	///
-	/// Network, missing-consignment, persistence, and unexpected backend failures leave the
-	/// validation pending so callers can retry. Permanently invalid or unsupported consignments
-	/// reject and close the unfunded channel.
-	pub async fn process_pending_rgb_funding_validation(
-		&self, temporary_channel_id: ChannelId,
-	) -> Result<(), APIError> {
-		let _active_validation = ActiveRgbFundingValidationGuard::acquire(
-			&self.active_rgb_funding_validations,
-			temporary_channel_id,
-		)?;
-		let pending = self
-			.pending_rgb_funding_validations
-			.lock()
-			.unwrap()
-			.get(&temporary_channel_id)
-			.cloned();
-		let result = match pending {
-			Some(pending) => {
-				let validation = match pending.validated_funding {
-					Some(validation) => Ok(bincode::deserialize(&validation).map_err(|error| {
-						APIError::ChannelUnavailable {
-							err: format!(
-								"Failed to restore cached RGB funding validation: {error}"
-							),
-						}
-					})?),
-					None => {
-						let validation = self
-							.rgb_backend
-							.accept_funding_transfer(
-								pending.funding_created.funding_txid.to_string(),
-								pending.funding_created.funding_output_index.into(),
-								pending.consignment_endpoint,
-								pending.funding_output_script,
-							)
-							.await;
-						if let Ok(ref validation) = validation {
-							self.cache_rgb_funding_validation(temporary_channel_id, validation)?;
-						}
-						validation
-					},
-				};
-				self.complete_rgb_funding_validation(temporary_channel_id, validation)
-			},
-			None => Err(APIError::APIMisuseError {
-				err: format!("No pending RGB funding validation for {temporary_channel_id}"),
-			}),
-		};
-		result
-	}
-
-	/// Rejects a pending incoming RGB funding validation and closes the unfunded channel.
-	///
-	/// This is the terminal transition for an application-level rejection. It fails if validation
-	/// is currently active or the temporary channel has no pending RGB funding validation.
-	pub fn reject_pending_rgb_funding_validation(
-		&self, temporary_channel_id: ChannelId, reason: String,
-	) -> Result<(), APIError> {
-		let _active_validation = ActiveRgbFundingValidationGuard::acquire(
-			&self.active_rgb_funding_validations,
-			temporary_channel_id,
-		)?;
-		let pending = self
-			.pending_rgb_funding_validations
-			.lock()
-			.unwrap()
-			.get(&temporary_channel_id)
-			.cloned()
-			.ok_or_else(|| APIError::APIMisuseError {
-				err: format!("No pending RGB funding validation for {temporary_channel_id}"),
-			})?;
-		self.reject_pending_rgb_funding_validation_internal(
-			temporary_channel_id,
-			&pending.counterparty_node_id,
-			reason,
-		)
-	}
-
-	/// Durably consumes all prepared RGB transaction fascia and retries signer-blocked channel
-	/// operations.
-	///
-	/// This is the asynchronous completion boundary for commitment, HTLC, and cooperative-close
-	/// RGB transaction construction. No built-in signer signature is released while its
-	/// transaction has a pending fascia record. Processing may reveal dependent HTLC transactions,
-	/// so this method repeats until signer retries no longer create pending RGB operations.
-	pub async fn process_pending_rgb_transactions(&self) -> Result<(), APIError> {
-		let mut iterations = 0u8;
-		loop {
-			self.rgb_backend
-				.process_pending_transactions(Arc::clone(&self.rgb_kv_store))
-				.await
-				.map_err(|error| APIError::ChannelUnavailable {
-					err: format!("Failed to persist pending RGB transactions: {error:?}"),
-				})?;
-			self.signer_unblocked(None);
-			if !self.rgb_backend.has_pending_transactions(self.rgb_kv_store.as_ref()).map_err(
-				|error| APIError::ChannelUnavailable {
-					err: format!("Failed to inspect pending RGB transactions: {error:?}"),
-				},
-			)? {
-				return Ok(());
-			}
-			iterations = iterations.saturating_add(1);
-			if iterations >= 32 {
-				return Err(APIError::ChannelUnavailable {
-					err: "RGB transaction persistence did not converge after 32 signer retries"
-						.to_owned(),
-				});
-			}
-		}
-	}
-
-	fn queue_rgb_transaction_persistence_event(&self) {
-		if !self.rgb_backend.has_pending_transactions(self.rgb_kv_store.as_ref()).unwrap_or(false) {
-			return;
-		}
-		let mut events = self.pending_events.lock().unwrap();
-		if !events
-			.iter()
-			.any(|(event, _)| matches!(event, events::Event::RgbTransactionPersistenceRequired))
-		{
-			events.push_back((events::Event::RgbTransactionPersistenceRequired, None));
-		}
 	}
 
 	#[cfg(test)]
@@ -4500,7 +4198,7 @@ where
 			};
 			match OutboundV1Channel::new(&self.fee_estimator, &self.entropy_source, &self.signer_provider, their_network_key,
 				their_features, channel_value_satoshis, push_msat, user_channel_id, config,
-				self.best_block.read().unwrap().height, outbound_scid_alias, temporary_channel_id, &*self.logger, consignment_endpoint, Arc::clone(&self.rgb_backend), push_asset_amount,
+				self.best_block.read().unwrap().height, outbound_scid_alias, temporary_channel_id, &*self.logger, consignment_endpoint, self.ldk_data_dir.clone(), push_asset_amount,
 				Arc::clone(&self.rgb_kv_store))
 			{
 				Ok(res) => res,
@@ -8837,9 +8535,6 @@ where
 								true
 							},
 							None => {
-								if self.pending_rgb_funding_validations.lock().unwrap().contains_key(chan_id) {
-									return true;
-								}
 								chan.context_mut().maybe_expire_prev_config();
 								let unfunded_context = chan.unfunded_context_mut().expect("channel should be unfunded");
 								if unfunded_context.should_expire_unfunded_channel() {
@@ -8970,8 +8665,8 @@ where
 			}
 
 			#[cfg(feature = "std")]
-			let duration_since_epoch = web_time::SystemTime::now()
-				.duration_since(web_time::SystemTime::UNIX_EPOCH)
+			let duration_since_epoch = std::time::SystemTime::now()
+				.duration_since(std::time::SystemTime::UNIX_EPOCH)
 				.expect("SystemTime::now() should come after SystemTime::UNIX_EPOCH");
 			#[cfg(not(feature = "std"))]
 			let duration_since_epoch = Duration::from_secs(
@@ -10542,7 +10237,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							&self.fee_estimator, &self.entropy_source, &self.signer_provider, *counterparty_node_id,
 							&self.channel_type_features(), &peer_state.latest_features, &open_channel_msg,
 							user_channel_id, &config, best_block_height, &self.logger, accept_0conf,
-							channel_funding_type == ChannelFundingType::Virtual, Arc::clone(&self.rgb_backend),
+							channel_funding_type == ChannelFundingType::Virtual, self.ldk_data_dir.clone(),
 							Arc::clone(&self.rgb_kv_store),
 						).map_err(|err| MsgHandleErrInternal::from_chan_no_close(err, *temporary_channel_id)
 						).map(|mut channel| {
@@ -10565,7 +10260,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							&open_channel_msg,
 							user_channel_id, &config, best_block_height,
 							&self.logger,
-							Arc::clone(&self.rgb_backend),
+							self.ldk_data_dir.clone(),
 							Arc::clone(&self.rgb_kv_store),
 						).map_err(|e| {
 							let channel_id = open_channel_msg.common_fields.temporary_channel_id;
@@ -10837,7 +10532,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				let mut channel = InboundV1Channel::new(
 					&self.fee_estimator, &self.entropy_source, &self.signer_provider, *counterparty_node_id,
 					&self.channel_type_features(), &peer_state.latest_features, msg, user_channel_id,
-					&self.config.read().unwrap(), best_block_height, &self.logger, /*is_0conf=*/false, /*is_virtual=*/false, Arc::clone(&self.rgb_backend),
+					&self.config.read().unwrap(), best_block_height, &self.logger, /*is_0conf=*/false, false, self.ldk_data_dir.clone(),
 					Arc::clone(&self.rgb_kv_store),
 				).map_err(|e| MsgHandleErrInternal::from_chan_no_close(e, msg.common_fields.temporary_channel_id))?;
 				let logger = WithChannelContext::from(&self.logger, &channel.context, None);
@@ -10855,7 +10550,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 					self.get_our_node_id(), *counterparty_node_id, &self.channel_type_features(),
 					&peer_state.latest_features, msg, user_channel_id,
 					&self.config.read().unwrap(), best_block_height, &self.logger,
-					Arc::clone(&self.rgb_backend),
+					self.ldk_data_dir.clone(),
 					Arc::clone(&self.rgb_kv_store),
 				).map_err(|e| MsgHandleErrInternal::from_chan_no_close(e, msg.common_fields.temporary_channel_id))?;
 				let message_send_event = MessageSendEvent::SendAcceptChannelV2 {
@@ -10923,13 +10618,6 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 
 	#[rustfmt::skip]
 	fn internal_funding_created(&self, counterparty_node_id: &PublicKey, msg: &msgs::FundingCreated) -> Result<(), MsgHandleErrInternal> {
-		self.internal_funding_created_with_rgb_validation(counterparty_node_id, msg, false)
-	}
-
-	#[rustfmt::skip]
-	fn internal_funding_created_with_rgb_validation(
-		&self, counterparty_node_id: &PublicKey, msg: &msgs::FundingCreated, rgb_validated: bool,
-	) -> Result<(), MsgHandleErrInternal> {
 		let best_block = *self.best_block.read().unwrap();
 
 		let per_peer_state = self.per_peer_state.read().unwrap();
@@ -10941,64 +10629,24 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 
 		let mut peer_state_lock = peer_state_mutex.lock().unwrap();
 		let peer_state = &mut *peer_state_lock;
-		if !rgb_validated {
-			if let Some(inbound_chan) = peer_state
-				.channel_by_id
-				.get(&msg.temporary_channel_id)
-				.and_then(Channel::as_unfunded_inbound_v1)
-			{
-				if let Some(consignment_endpoint) =
-					inbound_chan.funding.consignment_endpoint.clone()
-				{
-					let funding_output_script =
-						Some(inbound_chan.funding.get_funding_redeemscript().to_p2wsh());
-					let pending = PendingRgbFundingValidation {
-						counterparty_node_id: *counterparty_node_id,
-						funding_created: msg.clone(),
-						consignment_endpoint: consignment_endpoint.clone(),
-						push_asset_amount: inbound_chan.funding.push_asset_amount,
-						open_channel_msg: inbound_chan.open_channel_msg.clone(),
-						user_channel_id: inbound_chan.context.get_user_id(),
-						their_features: peer_state.latest_features.clone(),
-						is_0conf: inbound_chan.is_0conf,
-						is_manual_broadcast: inbound_chan.context.is_manual_broadcast(),
-						is_trusted_no_broadcast: inbound_chan.context.is_trusted_no_broadcast(),
-						validated_funding: None,
-						funding_output_script,
-					};
-					let mut pending_validations = self.pending_rgb_funding_validations.lock().unwrap();
-					if let Some(existing) = pending_validations.get(&msg.temporary_channel_id) {
-						if existing.counterparty_node_id != *counterparty_node_id
-							|| existing.funding_created != *msg
-						{
-							return Err(MsgHandleErrInternal::send_err_msg_no_close(
-								"Conflicting funding_created received while RGB funding validation is pending".to_owned(),
-								msg.temporary_channel_id,
-							));
-						}
-						return Ok(());
-					}
-					pending_validations.insert(msg.temporary_channel_id, pending);
-					self.pending_events.lock().unwrap().push_back((
-						events::Event::RgbFundingValidationRequired {
-							temporary_channel_id: msg.temporary_channel_id,
-							counterparty_node_id: *counterparty_node_id,
-							funding_txid: msg.funding_txid,
-							funding_output_index: msg.funding_output_index,
-							consignment_endpoint,
-						},
-						None,
-					));
-					return Ok(());
-				}
-			}
-		}
 		let (mut chan, funding_msg_opt, monitor) =
 			match peer_state.channel_by_id.remove(&msg.temporary_channel_id)
 				.map(Channel::into_unfunded_inbound_v1)
 			{
 				Some(Ok(inbound_chan)) => {
 					let logger = WithChannelContext::from(&self.logger, &inbound_chan.context, None);
+					if let Some(consignment_endpoint) = &inbound_chan.funding.consignment_endpoint {
+						match handle_funding(&msg.temporary_channel_id, msg.funding_txid.to_string(), &self.ldk_data_dir, consignment_endpoint.clone(), inbound_chan.funding.push_asset_amount, self.rgb_kv_store.as_ref()) {
+							Ok(()) => (),
+							Err(e) => {
+								// at this point the channel initiator already transitioned its channel to the funded channel ID
+								let mut chan = Channel::from(inbound_chan);
+								let funding_txo = OutPoint { txid: msg.funding_txid, index: msg.funding_output_index };
+								chan.context_mut().channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
+								return Err(convert_channel_err!(self, peer_state, e, &mut chan).1);
+							},
+						}
+					}
 					match inbound_chan.funding_created(msg, best_block, &self.signer_provider, &&logger) {
 						Ok(res) => res,
 						Err((inbound_chan, err)) => {
@@ -13277,7 +12925,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 
 		#[cfg(feature = "std")]
 		let duration_since_epoch = {
-			use web_time::SystemTime;
+			use std::time::SystemTime;
 			SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
 				.expect("SystemTime::now() should be after SystemTime::UNIX_EPOCH")
 		};
@@ -13350,14 +12998,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			invoice = invoice.rgb_amount(amt);
 		}
 
-		let mut channels = self.list_channels();
-		// For RGB invoices, only advertise channels that can receive the asset over their inbound
-		// side. Vanilla (BTC-only) channels report `inbound_htlc_maximum_rgb == 0`; including them
-		// as route hints would make the payer attempt to route RGB over a channel with no RGB,
-		// failing with "Cannot send more than our next-HTLC RGB maximum - 0".
-		if contract_id.is_some() {
-			channels.retain(|channel| channel.inbound_htlc_maximum_rgb > 0);
-		}
+		let channels = self.list_channels();
 		let route_hints = super::invoice_utils::sort_and_filter_channels(channels, amount_msats, &self.logger);
 		for hint in route_hints {
 			invoice = invoice.private_route(hint);
@@ -14115,8 +13756,8 @@ where
 		#[cfg(not(feature = "std"))]
 		let now = Duration::from_secs(self.highest_seen_timestamp.load(Ordering::Acquire) as u64);
 		#[cfg(feature = "std")]
-		let now = web_time::SystemTime::now()
-			.duration_since(web_time::SystemTime::UNIX_EPOCH)
+		let now = std::time::SystemTime::now()
+			.duration_since(std::time::SystemTime::UNIX_EPOCH)
 			.expect("SystemTime::now() should come after SystemTime::UNIX_EPOCH");
 
 		now
@@ -14455,7 +14096,6 @@ where
 	>(
 		&self, handler: H,
 	) {
-		self.queue_rgb_transaction_persistence_event();
 		let mut ev;
 		process_events_body!(self, ev, { handler(ev).await });
 	}
@@ -14507,10 +14147,7 @@ where
 					let mut peer_state_lock = peer_state_mutex.lock().unwrap();
 					let peer_state = &mut *peer_state_lock;
 					let pending_msg_events = &mut peer_state.pending_msg_events;
-					peer_state.channel_by_id.retain(|channel_id, chan| {
-						if self.pending_rgb_funding_validations.lock().unwrap().contains_key(channel_id) {
-							return true;
-						}
+					peer_state.channel_by_id.retain(|_, chan| {
 						let logger = WithChannelContext::from(&self.logger, &chan.context(), None);
 						let DisconnectResult { is_resumable, splice_funding_failed } =
 							chan.peer_disconnected_is_resumable(&&logger);
@@ -14835,7 +14472,6 @@ where
 	where
 		H::Target: EventHandler,
 	{
-		self.queue_rgb_transaction_persistence_event();
 		let mut ev;
 		process_events_body!(self, ev, handler.handle_event(ev));
 	}
@@ -17170,7 +16806,6 @@ where
 		if our_pending_intercepts.len() != 0 {
 			pending_intercepted_htlcs = Some(our_pending_intercepts);
 		}
-		let pending_rgb_funding_validations = self.pending_rgb_funding_validations.lock().unwrap();
 
 		let mut pending_claiming_payments = Some(&claimable_payments.pending_claiming_payments);
 		if pending_claiming_payments.as_ref().unwrap().is_empty() {
@@ -17210,7 +16845,6 @@ where
 			(17, in_flight_monitor_updates, option),
 			(19, peer_storage_dir, optional_vec),
 			(21, WithoutLength(&self.flow.writeable_async_receive_offer_cache()), required),
-			(23, *pending_rgb_funding_validations, required),
 		});
 
 		// Remove the SpliceFailed events added earlier.
@@ -17384,7 +17018,7 @@ pub struct ChannelManagerReadArgs<
 		HashMap<ChannelId, &'a ChannelMonitor<<SP::Target as SignerProvider>::EcdsaSigner>>,
 
 	/// LDK data directory
-	pub rgb_backend: Arc<RgbBackend>,
+	pub ldk_data_dir: PathBuf,
 
 	/// KVStore for RGB data persistence
 	pub rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
@@ -17421,7 +17055,7 @@ where
 		chain_monitor: M, tx_broadcaster: T, router: R, message_router: MR, logger: L,
 		config: UserConfig,
 		mut channel_monitors: Vec<&'a ChannelMonitor<<SP::Target as SignerProvider>::EcdsaSigner>>,
-		rgb_backend: Arc<RgbBackend>, rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
+		ldk_data_dir: PathBuf, rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Self {
 		Self {
 			entropy_source,
@@ -17437,7 +17071,7 @@ where
 			channel_monitors: hash_map_from_iter(
 				channel_monitors.drain(..).map(|monitor| (monitor.channel_id(), monitor)),
 			),
-			rgb_backend,
+			ldk_data_dir,
 			rgb_kv_store,
 		}
 	}
@@ -17541,7 +17175,7 @@ where
 					&args.entropy_source,
 					&args.signer_provider,
 					&provided_channel_type_features(&args.config),
-					Arc::clone(&args.rgb_backend),
+					args.ldk_data_dir.clone(),
 					Arc::clone(&args.rgb_kv_store),
 				),
 			)?;
@@ -17922,7 +17556,6 @@ where
 		let mut inbound_payment_id_secret = None;
 		let mut peer_storage_dir: Option<Vec<(PublicKey, Vec<u8>)>> = None;
 		let mut async_receive_offer_cache: AsyncReceiveOfferCache = AsyncReceiveOfferCache::new();
-		let mut pending_rgb_funding_validations = RequiredWrapper(None);
 		read_tlv_fields!(reader, {
 			(1, pending_outbound_payments_no_retry, option),
 			(2, pending_intercepted_htlcs, option),
@@ -17941,7 +17574,6 @@ where
 			(17, in_flight_monitor_updates, option),
 			(19, peer_storage_dir, optional_vec),
 			(21, async_receive_offer_cache, (default_value, async_receive_offer_cache)),
-			(23, pending_rgb_funding_validations, required),
 		});
 		let mut decode_update_add_htlcs = decode_update_add_htlcs.unwrap_or_else(|| new_hash_map());
 		let peer_storage_dir: Vec<(PublicKey, Vec<u8>)> = peer_storage_dir.unwrap_or_else(Vec::new);
@@ -18912,83 +18544,9 @@ where
 			#[cfg(feature = "_test_utils")]
 			testing_dnssec_proof_offer_resolution_override: Mutex::new(new_hash_map()),
 
-			rgb_backend: args.rgb_backend,
+			ldk_data_dir: args.ldk_data_dir,
 			rgb_kv_store: args.rgb_kv_store,
-			pending_rgb_funding_validations: Mutex::new(pending_rgb_funding_validations.0.unwrap()),
-			active_rgb_funding_validations: Mutex::new(new_hash_set()),
 		};
-
-		let pending_rgb_recovery_records: Vec<PendingRgbFundingValidation> = channel_manager
-			.pending_rgb_funding_validations
-			.lock()
-			.unwrap()
-			.values()
-			.cloned()
-			.collect();
-		for pending in pending_rgb_recovery_records {
-			// Phantom-channel guard: if this funding already completed before the crash, its
-			// channel monitor is persisted under the funded channel id. Reconstructing an
-			// unfunded inbound channel for the same outpoint would create a duplicate, diverged
-			// channel, so drop the now-moot pending validation record and skip reconstruction.
-			let funded_channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
-				txid: pending.funding_created.funding_txid,
-				index: pending.funding_created.funding_output_index,
-			});
-			if args.channel_monitors.contains_key(&funded_channel_id) {
-				channel_manager
-					.pending_rgb_funding_validations
-					.lock()
-					.unwrap()
-					.remove(&pending.funding_created.temporary_channel_id);
-				continue;
-			}
-			let mut channel = InboundV1Channel::new(
-				&channel_manager.fee_estimator,
-				&channel_manager.entropy_source,
-				&channel_manager.signer_provider,
-				pending.counterparty_node_id,
-				&channel_manager.channel_type_features(),
-				&pending.their_features,
-				&pending.open_channel_msg,
-				pending.user_channel_id,
-				&channel_manager.config.read().unwrap(),
-				channel_manager.best_block.read().unwrap().height,
-				&channel_manager.logger,
-				pending.is_0conf,
-				/*is_virtual=*/ false,
-				Arc::clone(&channel_manager.rgb_backend),
-				Arc::clone(&channel_manager.rgb_kv_store),
-			)
-			.map_err(|_| DecodeError::InvalidValue)?;
-			if pending.is_manual_broadcast {
-				channel.context.set_manual_broadcast();
-			}
-			if pending.is_trusted_no_broadcast {
-				channel.context.set_trusted_no_broadcast();
-			}
-			let logger = WithChannelContext::from(&channel_manager.logger, &channel.context, None);
-			channel.accept_inbound_channel(&&logger);
-			channel_manager
-				.per_peer_state
-				.write()
-				.unwrap()
-				.entry(pending.counterparty_node_id)
-				.or_insert_with(|| Mutex::new(empty_peer_state()))
-				.lock()
-				.unwrap()
-				.channel_by_id
-				.insert(pending.funding_created.temporary_channel_id, Channel::from(channel));
-			channel_manager.pending_events.lock().unwrap().push_back((
-				events::Event::RgbFundingValidationRequired {
-					temporary_channel_id: pending.funding_created.temporary_channel_id,
-					counterparty_node_id: pending.counterparty_node_id,
-					funding_txid: pending.funding_created.funding_txid,
-					funding_output_index: pending.funding_created.funding_output_index,
-					consignment_endpoint: pending.consignment_endpoint.clone(),
-				},
-				None,
-			));
-		}
 
 		let mut processed_claims: HashSet<Vec<MPPClaimHTLCSource>> = new_hash_set();
 		for (_, monitor) in args.channel_monitors.iter() {

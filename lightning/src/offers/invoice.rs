@@ -165,7 +165,7 @@ use core::time::Duration;
 use crate::prelude::*;
 
 #[cfg(feature = "std")]
-use web_time::SystemTime;
+use std::time::SystemTime;
 
 pub(crate) const DEFAULT_RELATIVE_EXPIRY: Duration = Duration::from_secs(7200);
 

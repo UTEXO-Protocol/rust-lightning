@@ -7,6 +7,8 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
+use std::path::PathBuf;
+
 use bitcoin::absolute::LockTime;
 use bitcoin::amount::{Amount, SignedAmount};
 use bitcoin::consensus::encode;
@@ -28,7 +30,7 @@ use bitcoin::secp256k1::{ecdsa::Signature, Secp256k1};
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use bitcoin::{secp256k1, sighash, FeeRate, Sequence, TxIn};
 
-use crate::rgb_utils::{ContractId, RgbTransport};
+use rgb_lib::{ContractId, RgbTransport};
 
 use crate::blinded_path::message::BlindedMessagePath;
 use crate::chain::chaininterface::{
@@ -79,7 +81,7 @@ use crate::rgb_utils::{
 	color_closing, color_commitment, color_htlc, get_rgb_channel_info_pending,
 	holder_validate_install_psbt_output_witness_scripts_hex,
 	holder_validate_take_psbt_output_witness_scripts_hex, is_tx_colored, rename_rgb_files,
-	update_rgb_channel_amount_pending, RgbBackend, RgbKvStoreExt,
+	update_rgb_channel_amount_pending, RgbKvStoreExt,
 };
 use crate::routing::gossip::NodeId;
 use crate::sign::ecdsa::EcdsaChannelSigner;
@@ -1556,14 +1558,6 @@ where
 
 	pub fn as_unfunded_outbound_v1_mut(&mut self) -> Option<&mut OutboundV1Channel<SP>> {
 		if let ChannelPhase::UnfundedOutboundV1(channel) = &mut self.phase {
-			Some(channel)
-		} else {
-			None
-		}
-	}
-
-	pub(super) fn as_unfunded_inbound_v1(&self) -> Option<&InboundV1Channel<SP>> {
-		if let ChannelPhase::UnfundedInboundV1(channel) = &self.phase {
 			Some(channel)
 		} else {
 			None
@@ -3206,7 +3200,7 @@ where
 
 	pub(super) is_colored: bool,
 
-	pub(crate) rgb_backend: Arc<RgbBackend>,
+	pub(crate) ldk_data_dir: PathBuf,
 
 	/// KVStore for RGB data persistence
 	pub(crate) rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
@@ -3238,7 +3232,7 @@ where
 			holder_commitment_point.next_transaction_number(), &holder_commitment_point.next_point(),
 			true, false, logger);
 		if self.context().is_colored() {
-			color_commitment(&self.context(), &self.funding(), &mut commitment_data.tx, false)?;
+			color_commitment(&self.context(), &self.funding(), &mut commitment_data.tx, false).expect("successful commitment coloring");
 		}
 		let initial_commitment_tx = commitment_data.tx;
 		let trusted_tx = initial_commitment_tx.trust();
@@ -3282,7 +3276,7 @@ where
 			context.counterparty_next_commitment_transaction_number,
 			&context.counterparty_next_commitment_point.unwrap(), false, false, logger);
 		if self.context().is_colored() {
-			color_commitment(&self.context(), &self.funding(), &mut commitment_data.tx, true)?;
+			color_commitment(&self.context(), &self.funding(), &mut commitment_data.tx, true).unwrap();
 		}
 		let counterparty_initial_commitment_tx = commitment_data.tx;
 		let counterparty_trusted_tx = counterparty_initial_commitment_tx.trust();
@@ -3319,8 +3313,7 @@ where
 		let temporary_channel_id = context.channel_id;
 		context.channel_id = channel_id;
 		if context.is_colored() && temporary_channel_id != channel_id {
-			rename_rgb_files(&context.channel_id, &temporary_channel_id, context.rgb_kv_store.as_ref())
-				.map_err(|e| ChannelError::close(format!("Failed to rename RGB files: {e}")))?;
+			rename_rgb_files(&context.channel_id, &temporary_channel_id, context.rgb_kv_store.as_ref());
 		}
 
 		assert!(!context.channel_state.is_monitor_update_in_progress()); // We have not had any monitor(s) yet to fail update!
@@ -3490,7 +3483,7 @@ where
 		msg_push_msat: u64,
 		open_channel_fields: msgs::CommonOpenChannelFields,
 		push_asset_amount: Option<u64>,
-		rgb_backend: Arc<RgbBackend>,
+		ldk_data_dir: PathBuf,
 		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<(FundingScope, ChannelContext<SP>), ChannelError>
 		where
@@ -3821,7 +3814,7 @@ where
 			interactive_tx_signing_session: None,
 
 			is_colored: funding.consignment_endpoint.is_some(),
-			rgb_backend,
+			ldk_data_dir,
 			rgb_kv_store,
 		};
 
@@ -3847,7 +3840,7 @@ where
 		holder_signer: <SP::Target as SignerProvider>::EcdsaSigner,
 		_logger: L,
 		consignment_endpoint: Option<RgbTransport>,
-		rgb_backend: Arc<RgbBackend>,
+		ldk_data_dir: PathBuf,
 		push_asset_amount: Option<u64>,
 		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<(FundingScope, ChannelContext<SP>), APIError>
@@ -4070,7 +4063,7 @@ where
 			interactive_tx_signing_session: None,
 
 			is_colored: funding.consignment_endpoint.is_some(),
-			rgb_backend,
+			ldk_data_dir,
 			rgb_kv_store,
 		};
 
@@ -5143,7 +5136,8 @@ where
 			logger,
 		);
 		if self.is_colored() {
-			color_commitment(&self, &funding, &mut commitment_data.tx, false)?;
+			color_commitment(&self, &funding, &mut commitment_data.tx, false)
+				.expect("successful commitment coloring");
 		}
 		let commitment_txid = {
 			let trusted_tx = commitment_data.tx.trust();
@@ -5200,12 +5194,8 @@ where
 				&holder_keys.revocation_key,
 			);
 			if self.is_colored() && !self.is_trusted_no_broadcast() {
-				color_htlc(
-					&mut htlc_tx,
-					htlc,
-					self.rgb_backend.as_ref(),
-					self.rgb_kv_store.as_ref(),
-				)?;
+				color_htlc(&mut htlc_tx, htlc, &self.ldk_data_dir, self.rgb_kv_store.as_ref())
+					.expect("successful htlc coloring");
 			}
 
 			let htlc_redeemscript =
@@ -6350,15 +6340,6 @@ where
 		log_trace!(logger, "Initial counterparty tx for channel {} is: txid {} tx {}",
 			&self.channel_id(), counterparty_initial_bitcoin_tx.txid, encode::serialize_hex(&counterparty_initial_bitcoin_tx.transaction));
 
-		if counterparty_initial_commitment_tx.is_colored()
-			&& !self
-				.rgb_backend
-				.is_transaction_durable(&counterparty_initial_bitcoin_tx.txid, self.rgb_kv_store.as_ref())
-		{
-			self.signer_pending_funding = true;
-			return None;
-		}
-
 		// We sign "counterparty" commitment transaction, allowing them to broadcast the tx if they wish.
 		let signature = match &self.holder_signer {
 			// TODO (arik): move match into calling method for Taproot
@@ -6482,21 +6463,11 @@ where
 			true,
 			logger,
 		);
-		if self.is_colored()
-			&& color_commitment(&self, &funding, &mut commitment_data.tx, true).is_err()
-		{
-			// Defer signature production (as the not-yet-durable branch below does) instead of
-			// panicking if RGB coloring/persistence fails; it is retried when storage recovers.
-			return None;
+		if self.is_colored() {
+			color_commitment(&self, &funding, &mut commitment_data.tx, true)
+				.expect("successful commitment coloring");
 		}
 		let counterparty_initial_commitment_tx = commitment_data.tx;
-		if counterparty_initial_commitment_tx.is_colored()
-			&& !self.rgb_backend.is_transaction_durable(
-				&counterparty_initial_commitment_tx.trust().built_transaction().txid,
-				self.rgb_kv_store.as_ref(),
-			) {
-			return None;
-		}
 		match self.holder_signer {
 			// TODO (taproot|arik): move match into calling method for Taproot
 			ChannelSignerType::Ecdsa(ref ecdsa) => {
@@ -7476,9 +7447,10 @@ where
 			color_closing(
 				&self.context.channel_id,
 				&mut closing_transaction,
-				self.context.rgb_backend.as_ref(),
+				&self.context.ldk_data_dir,
 				self.context.rgb_kv_store.as_ref(),
-			)?;
+			)
+			.expect("successful closing TX coloring");
 		}
 		Ok((closing_transaction, total_fee_satoshis))
 	}
@@ -8209,7 +8181,8 @@ where
 				&pending_splice_funding,
 				&mut counterparty_commitment_tx,
 				true,
-			)?;
+			)
+			.expect("successful commitment coloring");
 		}
 
 		{
@@ -9076,10 +9049,7 @@ where
 				rgb_offered_htlc,
 				rgb_received_htlc,
 				self.context.rgb_kv_store.as_ref(),
-			)
-			.map_err(|e| {
-				ChannelError::close(format!("Failed to update RGB channel amount: {e}"))
-			})?;
+			);
 		}
 
 		if let Some((feerate, update_state)) = self.context.pending_update_fee {
@@ -10815,22 +10785,6 @@ where
 	where
 		L::Target: Logger,
 	{
-		if closing_tx
-			.trust()
-			.built_transaction()
-			.output
-			.iter()
-			.any(|output| output.script_pubkey.is_op_return())
-			&& !self.context.rgb_backend.is_transaction_durable(
-				&closing_tx.trust().built_transaction().compute_txid(),
-				self.context.rgb_kv_store.as_ref(),
-			) {
-			self.context.signer_pending_closing = true;
-			let fee_range = msgs::ClosingSignedFeeRange { min_fee_satoshis, max_fee_satoshis };
-			self.context.last_sent_closing_fee =
-				Some((fee_satoshis, skip_remote_output, fee_range, None));
-			return None;
-		}
 		let sig = match &self.context.holder_signer {
 			ChannelSignerType::Ecdsa(ecdsa) => ecdsa
 				.sign_closing_transaction(
@@ -11909,11 +11863,7 @@ where
 		let were_node_one = node_id.as_slice() < counterparty_node_id.as_slice();
 
 		let contract_id = if self.context.is_colored() {
-			let rgb_info = get_rgb_channel_info_pending(
-				&self.context.channel_id,
-				self.context.rgb_kv_store.as_ref(),
-			)
-			.map_err(|e| ChannelError::close(format!("Failed to read RGB channel info: {e}")))?;
+			let rgb_info = get_rgb_channel_info_pending(&self.context.channel_id, self.context.rgb_kv_store.as_ref());
 			Some(rgb_info.contract_id)
 		} else {
 			None
@@ -13067,10 +13017,7 @@ where
 			}
 		}
 		if self.context.is_colored() && rgb_received_htlc > 0 {
-			// This commitment builder has no fallible return; a KVStore failure updating the RGB
-			// channel balance is unrecoverable for the channel (pre-existing behavior).
-			update_rgb_channel_amount_pending(&self.context.channel_id, 0, rgb_received_htlc, self.context.rgb_kv_store.as_ref())
-				.expect("RGB channel amount update");
+			update_rgb_channel_amount_pending(&self.context.channel_id, 0, rgb_received_htlc, self.context.rgb_kv_store.as_ref());
 		}
 		if let Some((feerate, update_state)) = self.context.pending_update_fee {
 			if update_state == FeeUpdateState::AwaitingRemoteRevokeToAnnounce {
@@ -13197,16 +13144,6 @@ where
 			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true)?;
 		}
 		let counterparty_commitment_tx = commitment_data.tx;
-		if counterparty_commitment_tx.is_colored()
-			&& !self.context.rgb_backend.is_transaction_durable(
-				&counterparty_commitment_tx.trust().built_transaction().txid,
-				self.context.rgb_kv_store.as_ref(),
-			)
-		{
-			return Err(ChannelError::Ignore(
-				"RGB commitment fascia is awaiting durable persistence".to_owned(),
-			));
-		}
 
 		match &self.context.holder_signer {
 			ChannelSignerType::Ecdsa(ecdsa) => {
@@ -13746,7 +13683,7 @@ where
 	pub fn new<ES: Deref, F: Deref, L: Deref>(
 		fee_estimator: &LowerBoundedFeeEstimator<F>, entropy_source: &ES, signer_provider: &SP, counterparty_node_id: PublicKey, their_features: &InitFeatures,
 		channel_value_satoshis: u64, push_msat: u64, user_id: u128, config: &UserConfig, current_chain_height: u32,
-		outbound_scid_alias: u64, temporary_channel_id: Option<ChannelId>, logger: L, consignment_endpoint: Option<RgbTransport>, rgb_backend: Arc<RgbBackend>, push_asset_amount: Option<u64>,
+		outbound_scid_alias: u64, temporary_channel_id: Option<ChannelId>, logger: L, consignment_endpoint: Option<RgbTransport>, ldk_data_dir: PathBuf, push_asset_amount: Option<u64>,
 		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<OutboundV1Channel<SP>, APIError>
 	where ES::Target: EntropySource,
@@ -13788,7 +13725,7 @@ where
 			holder_signer,
 			logger,
 			consignment_endpoint,
-			rgb_backend,
+			ldk_data_dir,
 			push_asset_amount,
 			rgb_kv_store,
 		)?;
@@ -13809,24 +13746,10 @@ where
 		let mut commitment_data = self.context.build_commitment_transaction(&self.funding,
 			self.context.counterparty_next_commitment_transaction_number,
 			&self.context.counterparty_next_commitment_point.unwrap(), false, false, logger);
-		if self.context.is_colored()
-			&& color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true).is_err()
-		{
-			// Defer (like the not-yet-durable branch below) rather than panicking on an RGB
-			// coloring/persistence failure.
-			self.context.signer_pending_funding = true;
-			return None;
+		if self.context.is_colored() {
+			color_commitment(&self.context, &self.funding, &mut commitment_data.tx, true).unwrap();
 		}
 		let counterparty_initial_commitment_tx = commitment_data.tx;
-		if counterparty_initial_commitment_tx.is_colored()
-			&& !self.context.rgb_backend.is_transaction_durable(
-				&counterparty_initial_commitment_tx.trust().built_transaction().txid,
-				self.context.rgb_kv_store.as_ref(),
-			)
-		{
-			self.context.signer_pending_funding = true;
-			return None;
-		}
 		let signature = match &self.context.holder_signer {
 			// TODO (taproot|arik): move match into calling method for Taproot
 			ChannelSignerType::Ecdsa(ecdsa) => {
@@ -13888,8 +13811,7 @@ where
 		let temporary_channel_id = self.context.channel_id;
 		self.context.channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
 		if self.context.is_colored() {
-			rename_rgb_files(&self.context.channel_id, &temporary_channel_id, self.context.rgb_kv_store.as_ref())
-				.expect("RGB file rename");
+			rename_rgb_files(&self.context.channel_id, &temporary_channel_id, self.context.rgb_kv_store.as_ref());
 		}
 
 		// If the funding transaction is a coinbase transaction, we need to set the minimum depth to 100.
@@ -14099,8 +14021,6 @@ where
 	pub context: ChannelContext<SP>,
 	pub unfunded_context: UnfundedChannelContext,
 	pub signer_pending_accept_channel: bool,
-	pub open_channel_msg: msgs::OpenChannel,
-	pub is_0conf: bool,
 }
 
 /// Fetches the [`ChannelTypeFeatures`] that will be used for a channel built from a given
@@ -14145,7 +14065,7 @@ where
 		fee_estimator: &LowerBoundedFeeEstimator<F>, entropy_source: &ES, signer_provider: &SP,
 		counterparty_node_id: PublicKey, our_supported_features: &ChannelTypeFeatures,
 		their_features: &InitFeatures, msg: &msgs::OpenChannel, user_id: u128, config: &UserConfig,
-		current_chain_height: u32, logger: &L, is_0conf: bool, is_virtual: bool, rgb_backend: Arc<RgbBackend>,
+		current_chain_height: u32, logger: &L, is_0conf: bool, is_virtual: bool, ldk_data_dir: PathBuf,
 		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<InboundV1Channel<SP>, ChannelError>
 		where ES::Target: EntropySource,
@@ -14188,21 +14108,14 @@ where
 			msg.push_msat,
 			msg.common_fields.clone(),
 			msg.push_asset_amount,
-			rgb_backend,
+			ldk_data_dir,
 			rgb_kv_store,
 		)?;
 		let unfunded_context = UnfundedChannelContext {
 			unfunded_channel_age_ticks: 0,
 			holder_commitment_point: HolderCommitmentPoint::new(&context.holder_signer, &context.secp_ctx),
 		};
-		let chan = Self {
-			funding,
-			context,
-			unfunded_context,
-			signer_pending_accept_channel: false,
-			open_channel_msg: msg.clone(),
-			is_0conf,
-		};
+		let chan = Self { funding, context, unfunded_context, signer_pending_accept_channel: false };
 		Ok(chan)
 	}
 
@@ -14397,7 +14310,7 @@ where
 		counterparty_node_id: PublicKey, their_features: &InitFeatures, funding_satoshis: u64,
 		funding_inputs: Vec<FundingTxInput>, user_id: u128, config: &UserConfig,
 		current_chain_height: u32, outbound_scid_alias: u64, funding_confirmation_target: ConfirmationTarget,
-		logger: L, rgb_backend: Arc<RgbBackend>, rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
+		logger: L, ldk_data_dir: PathBuf, rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<Self, APIError>
 	where ES::Target: EntropySource,
 	      F::Target: FeeEstimator,
@@ -14439,7 +14352,7 @@ where
 			logger,
 			// ok to pass consignment_endpoint as None since this method is unused
 			None,
-			rgb_backend,
+			ldk_data_dir,
 			None,
 			rgb_kv_store,
 		)?;
@@ -14552,7 +14465,7 @@ where
 		holder_node_id: PublicKey, counterparty_node_id: PublicKey, our_supported_features: &ChannelTypeFeatures,
 		their_features: &InitFeatures, msg: &msgs::OpenChannelV2,
 		user_id: u128, config: &UserConfig, current_chain_height: u32, logger: &L,
-		rgb_backend: Arc<RgbBackend>, rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
+		ldk_data_dir: PathBuf, rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<Self, ChannelError>
 		where ES::Target: EntropySource,
 			  F::Target: FeeEstimator,
@@ -14599,7 +14512,7 @@ where
 			0 /* push_msat not used in dual-funding */,
 			msg.common_fields.clone(),
 			None,
-			rgb_backend,
+			ldk_data_dir,
 			rgb_kv_store,
 		)?;
 		let channel_id = ChannelId::v2_from_revocation_basepoints(
@@ -15300,7 +15213,7 @@ impl<'a, 'b, 'c, ES: Deref, SP: Deref>
 		&'a ES,
 		&'b SP,
 		&'c ChannelTypeFeatures,
-		Arc<RgbBackend>,
+		PathBuf,
 		Arc<dyn KVStoreSync + Send + Sync>,
 	)> for FundedChannel<SP>
 where
@@ -15313,11 +15226,11 @@ where
 			&'a ES,
 			&'b SP,
 			&'c ChannelTypeFeatures,
-			Arc<RgbBackend>,
+			PathBuf,
 			Arc<dyn KVStoreSync + Send + Sync>,
 		),
 	) -> Result<Self, DecodeError> {
-		let (entropy_source, signer_provider, our_supported_features, rgb_backend, rgb_kv_store) =
+		let (entropy_source, signer_provider, our_supported_features, ldk_data_dir, rgb_kv_store) =
 			args;
 		let ver = read_ver_prefix!(reader, SERIALIZATION_VERSION);
 		if ver <= 2 {
@@ -16119,7 +16032,7 @@ where
 
 				interactive_tx_signing_session,
 				is_colored: consignment_endpoint.is_some(),
-				rgb_backend,
+				ldk_data_dir,
 				rgb_kv_store,
 			},
 			holder_commitment_point,
@@ -16135,8 +16048,8 @@ fn duration_since_epoch() -> Option<Duration> {
 
 	#[cfg(feature = "std")]
 	let now = Some(
-		web_time::SystemTime::now()
-			.duration_since(web_time::SystemTime::UNIX_EPOCH)
+		std::time::SystemTime::now()
+			.duration_since(std::time::SystemTime::UNIX_EPOCH)
 			.expect("SystemTime::now() should come after SystemTime::UNIX_EPOCH"),
 	);
 

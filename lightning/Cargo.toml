@@ -24,17 +24,14 @@ _externalize_tests = ["inventory", "_test_utils"]
 # This is unsafe to use in production because it may result in the counterparty publishing taking our funds.
 unsafe_revoked_tx_signing = []
 
-std = ["dep:web-time"]
+std = []
 
 dnssec = ["dnssec-prover/validation"]
 
 # Generates low-r bitcoin signatures, which saves 1 byte in 50% of the cases
 grind_signatures = []
 
-rgb-native = ["dep:rgb-lib", "dep:tokio"]
-rgb-wasm = ["std", "dep:rgb-lib-wasm"]
-
-default = ["std", "grind_signatures", "rgb-native"]
+default = ["std", "grind_signatures"]
 
 [dependencies]
 lightning-types = { version = "0.3.0", path = "../lightning-types", default-features = false }
@@ -56,16 +53,18 @@ inventory = { version = "0.3", optional = true  }
 
 # RGB and related
 bincode = "1.3"
-rgb-invoicing = { version = "=0.11.1-rc.10", default-features = false, features = ["serde"] }
-rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", tag = "v0.3.0-beta.24", optional = true, features = [
+futures = "0.3"
+rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", tag = "v0.3.0-beta.24", features = [
     "electrum",
     "esplora",
 ] }
-rgb-lib-wasm = { git = "https://github.com/UTEXO-Protocol/rgb-lib-wasm.git", branch = "dev", optional = true }
-serde = { version = "^1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1.14.1", optional = true, features = ["macros", "rt-multi-thread"] }
-web-time = { version = "1.1", optional = true }
+serde = { version = "^1.0", features = [
+    "derive",
+] }
+tokio = { version = "1.14.1", features = [
+    "macros",
+    "rt-multi-thread",
+] }
 
 [dev-dependencies]
 regex = "1.5.6"

@@ -9,7 +9,7 @@ description = "A crate which implements DNSSEC resolution for lightning clients 
 edition = "2021"
 
 [dependencies]
-lightning = { version = "0.2.0", path = "../lightning", default-features = false, features = ["rgb-native"] }
+lightning = { version = "0.2.0", path = "../lightning", default-features = false }
 lightning-types = { version = "0.3.0", path = "../lightning-types", default-features = false }
 dnssec-prover = { version = "0.6", default-features = false, features = [ "std", "tokio" ] }
 tokio = { version = "1.0", default-features = false, features = ["rt"] }

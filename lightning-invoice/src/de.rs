@@ -22,7 +22,7 @@ use lightning_types::routing::{RouteHint, RouteHintHop, RoutingFees};
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
 use bitcoin::secp256k1::PublicKey;
 
-use crate::ContractId;
+use rgb_lib::ContractId;
 
 use super::{
 	constants, Bolt11Invoice, Bolt11InvoiceFeatures, Bolt11InvoiceSignature, Bolt11ParseError,

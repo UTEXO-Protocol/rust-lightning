@@ -738,7 +738,7 @@ macro_rules! invoice_request_respond_with_explicit_signing_pubkey_methods { (
 	$self: ident, $contents: expr, $builder: ty
 ) => {
 	/// Creates an [`InvoiceBuilder`] for the request with the given required fields and using the
-	/// [`Duration`] since [`web_time::SystemTime::UNIX_EPOCH`] as the creation time.
+	/// [`Duration`] since [`std::time::SystemTime::UNIX_EPOCH`] as the creation time.
 	///
 	/// See [`InvoiceRequest::respond_with_no_std`] for further details where the aforementioned
 	/// creation time is used for the `created_at` parameter.
@@ -748,8 +748,8 @@ macro_rules! invoice_request_respond_with_explicit_signing_pubkey_methods { (
 	pub fn respond_with(
 		&$self, payment_paths: Vec<BlindedPaymentPath>, payment_hash: PaymentHash
 	) -> Result<$builder, Bolt12SemanticError> {
-		let created_at = web_time::SystemTime::now()
-			.duration_since(web_time::SystemTime::UNIX_EPOCH)
+		let created_at = std::time::SystemTime::now()
+			.duration_since(std::time::SystemTime::UNIX_EPOCH)
 			.expect("SystemTime::now() should come after SystemTime::UNIX_EPOCH");
 
 		$contents.respond_with_no_std(payment_paths, payment_hash, created_at)
@@ -1026,8 +1026,8 @@ macro_rules! invoice_request_respond_with_derived_signing_pubkey_methods { (
 	pub fn respond_using_derived_keys(
 		&$self, payment_paths: Vec<BlindedPaymentPath>, payment_hash: PaymentHash
 	) -> Result<$builder, Bolt12SemanticError> {
-		let created_at = web_time::SystemTime::now()
-			.duration_since(web_time::SystemTime::UNIX_EPOCH)
+		let created_at = std::time::SystemTime::now()
+			.duration_since(std::time::SystemTime::UNIX_EPOCH)
 			.expect("SystemTime::now() should come after SystemTime::UNIX_EPOCH");
 
 		$self.respond_using_derived_keys_no_std(payment_paths, payment_hash, created_at)

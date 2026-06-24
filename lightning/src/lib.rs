@@ -23,14 +23,11 @@
 //! * `std` - enables functionalities which require `std`, including `std::io` trait implementations and things which utilize time
 //! * `grind_signatures` - enables generation of [low-r bitcoin signatures](https://bitcoin.stackexchange.com/questions/111660/what-is-signature-grinding),
 //! which saves 1 byte per signature in 50% of the cases (see [bitcoin PR #13666](https://github.com/bitcoin/bitcoin/pull/13666))
-//! * `rgb-native` - selects the native production RGB wallet backend
 //!
 //! Available features are:
 //!
 //! * `std`
 //! * `grind_signatures`
-//! * `rgb-native`
-//! * `rgb-wasm` - selects the browser WebAssembly production RGB wallet backend
 
 #![cfg_attr(not(any(test, fuzzing, feature = "_test_utils")), deny(missing_docs))]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -45,15 +42,6 @@
 
 #[cfg(all(fuzzing, test))]
 compile_error!("Tests will always fail with cfg=fuzzing");
-
-#[cfg(all(feature = "rgb-native", feature = "rgb-wasm"))]
-compile_error!("`rgb-native` and `rgb-wasm` are mutually exclusive production RGB backends");
-
-#[cfg(not(any(feature = "rgb-native", feature = "rgb-wasm")))]
-compile_error!("exactly one production RGB backend must be enabled: `rgb-native` or `rgb-wasm`");
-
-#[cfg(all(feature = "rgb-wasm", not(target_arch = "wasm32")))]
-compile_error!("the `rgb-wasm` production backend requires a wasm32 target");
 
 #[macro_use]
 extern crate alloc;

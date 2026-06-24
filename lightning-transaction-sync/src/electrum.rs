@@ -23,7 +23,7 @@ use bitcoin::{BlockHash, Script, Transaction, Txid};
 use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
-use web_time::Instant;
+use std::time::Instant;
 
 /// Synchronizes LDK with a given Electrum server.
 ///

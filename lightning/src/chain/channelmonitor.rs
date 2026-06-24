@@ -32,7 +32,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::ecdsa::Signature as BitcoinSignature;
 use bitcoin::secp256k1::{self, ecdsa::Signature, PublicKey, Secp256k1, SecretKey};
 
-use crate::rgb_utils::ContractId;
+use rgb_lib::ContractId;
 
 use crate::chain;
 use crate::chain::chaininterface::{

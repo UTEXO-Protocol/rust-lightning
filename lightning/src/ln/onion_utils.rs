@@ -38,7 +38,7 @@ use bitcoin::secp256k1;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 
-use crate::rgb_utils::ContractId;
+use rgb_lib::ContractId;
 
 use crate::io::{Cursor, Read};
 use core::ops::Deref;

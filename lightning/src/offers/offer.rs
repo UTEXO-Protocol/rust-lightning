@@ -114,7 +114,7 @@ use crate::prelude::*;
 
 use bitcoin::hex::impl_fmt_traits;
 #[cfg(feature = "std")]
-use web_time::SystemTime;
+use std::time::SystemTime;
 
 pub(super) const IV_BYTES_WITH_METADATA: &[u8; IV_LEN] = b"LDK Offer ~~~~~~";
 pub(super) const IV_BYTES_WITHOUT_METADATA: &[u8; IV_LEN] = b"LDK Offer v2~~~~";

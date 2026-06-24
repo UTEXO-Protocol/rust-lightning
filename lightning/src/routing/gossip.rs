@@ -21,7 +21,7 @@ use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hashes::Hash;
 use bitcoin::network::Network;
 
-use crate::rgb_utils::ContractId;
+use rgb_lib::ContractId;
 
 use crate::ln::msgs;
 use crate::ln::msgs::{
@@ -59,7 +59,7 @@ use core::{cmp, fmt};
 pub use lightning_types::routing::RoutingFees;
 
 #[cfg(feature = "std")]
-use web_time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// We remove stale channel directional info two weeks after the last update, per BOLT 7's
 /// suggestion.
@@ -3075,7 +3075,7 @@ pub(crate) mod tests {
 
 		#[cfg(feature = "std")]
 		{
-			use web_time::{SystemTime, UNIX_EPOCH};
+			use std::time::{SystemTime, UNIX_EPOCH};
 
 			let tracking_time = SystemTime::now()
 				.duration_since(UNIX_EPOCH)
@@ -3491,7 +3491,7 @@ pub(crate) mod tests {
 			// We want to check that this will work even if *one* of the channel updates is recent,
 			// so we should add it with a recent timestamp.
 			assert!(network_graph.read_only().channels().get(&scid).unwrap().one_to_two.is_none());
-			use web_time::{SystemTime, UNIX_EPOCH};
+			use std::time::{SystemTime, UNIX_EPOCH};
 			let announcement_time = SystemTime::now()
 				.duration_since(UNIX_EPOCH)
 				.expect("Time must be > 1970")
@@ -3527,7 +3527,7 @@ pub(crate) mod tests {
 
 		#[cfg(feature = "std")]
 		{
-			use web_time::{SystemTime, UNIX_EPOCH};
+			use std::time::{SystemTime, UNIX_EPOCH};
 
 			let tracking_time = SystemTime::now()
 				.duration_since(UNIX_EPOCH)
@@ -3833,7 +3833,7 @@ pub(crate) mod tests {
 	#[cfg(feature = "std")]
 	fn calling_sync_routing_table() {
 		use crate::ln::msgs::Init;
-		use web_time::{SystemTime, UNIX_EPOCH};
+		use std::time::{SystemTime, UNIX_EPOCH};
 
 		let network_graph = create_network_graph();
 		let (secp_ctx, gossip_sync) = create_gossip_sync(&network_graph);

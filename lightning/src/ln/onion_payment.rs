@@ -8,7 +8,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
 
-use crate::rgb_utils::ContractId;
+use rgb_lib::ContractId;
 
 use crate::blinded_path;
 use crate::blinded_path::payment::{PaymentConstraints, PaymentRelay};
