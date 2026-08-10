@@ -155,7 +155,9 @@ fn test_125_dangling_post_update_actions() {
 		.unwrap();
 
 		let route_params =
-			router_0_0_125::RouteParameters::from_payment_params_and_value_without_rgb(pay_params, 15_000_000);
+			router_0_0_125::RouteParameters::from_payment_params_and_value_without_rgb(
+				pay_params, 15_000_000,
+			);
 		let route = lightning_0_0_125_utils::get_route(&nodes[0], &route_params).unwrap();
 
 		let onion = RecipientOnionFields_0_0_125::secret_only(secret);
@@ -372,8 +374,9 @@ fn do_test_0_1_htlc_forward_after_splice(fail_htlc: bool) {
 		.with_bolt11_features(nodes[2].node.bolt11_invoice_features())
 		.unwrap();
 
-		let route_params =
-			router_0_1::RouteParameters::from_payment_params_and_value_without_rgb(pay_params, 1_000_000);
+		let route_params = router_0_1::RouteParameters::from_payment_params_and_value_without_rgb(
+			pay_params, 1_000_000,
+		);
 		let mut route = lightning_0_1_utils::get_route(&nodes[0], &route_params).unwrap();
 		route.paths[0].hops[1].cltv_expiry_delta =
 			EXTRA_BLOCKS_BEFORE_FAIL + HTLC_FAIL_BACK_BUFFER + 1;
