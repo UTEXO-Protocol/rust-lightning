@@ -48,6 +48,7 @@ use crate::chain::Filter;
 use crate::chain::{BestBlock, WatchedOutput};
 use crate::events::bump_transaction::{AnchorDescriptor, BumpTransactionEvent};
 use crate::events::{ClosureReason, Event, EventHandler, PaidBolt12Invoice, ReplayEvent};
+use crate::io_extras;
 use crate::ln::chan_utils::{
 	self, ChannelTransactionParameters, CommitmentTransaction, CounterpartyCommitmentSecrets,
 	HTLCClaim, HTLCOutputInCommitment, HolderCommitmentTransaction,
@@ -1514,7 +1515,10 @@ impl<Signer: EcdsaChannelSigner> Writeable for ChannelMonitor<Signer> {
 }
 
 // These are also used for ChannelMonitorUpdate, above.
-const SERIALIZATION_VERSION: u8 = 1;
+// Version 2 adds `HTLCOutputInCommitment::rgb_payment` to the monitor's legacy fixed-width HTLC
+// records. This field cannot be added compatibly without a version boundary because it precedes
+// other variable-length records in the stream.
+const SERIALIZATION_VERSION: u8 = 2;
 const MIN_SERIALIZATION_VERSION: u8 = 1;
 
 /// Utility function for writing [`ChannelMonitor`] to prevent code duplication in [`ChainMonitor`] while sending Peer Storage.
@@ -1597,7 +1601,7 @@ pub(crate) fn write_chanmon_internal<Signer: EcdsaChannelSigner, W: Writer>(
 			writer.write_all(&$htlc_output.cltv_expiry.to_be_bytes())?;
 			writer.write_all(&$htlc_output.payment_hash.0[..])?;
 			$htlc_output.transaction_output_index.write(writer)?;
-            $htlc_output.rgb_payment.write(writer)?;
+			$htlc_output.rgb_payment.write(writer)?;
 		}
 	}
 
@@ -6434,8 +6438,55 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP)>
 	for Option<(BlockHash, ChannelMonitor<SP::EcdsaSigner>)>
 {
-	#[rustfmt::skip]
 	fn read<R: io::Read>(reader: &mut R, args: (&'a ES, &'b SP)) -> Result<Self, DecodeError> {
+		let bytes =
+			io_extras::read_to_end(reader).map_err(|error| DecodeError::Io(error.kind()))?;
+		if bytes.len() < 2 {
+			return Err(DecodeError::ShortRead);
+		}
+
+		let parse = |legacy_rgb_layout| {
+			let mut cursor = io::Cursor::new(&bytes);
+			let decoded = read_channel_monitor(&mut cursor, args, legacy_rgb_layout)?;
+			if cursor.position() != bytes.len() as u64 {
+				return Err(DecodeError::BadLengthDescriptor);
+			}
+			Ok(decoded)
+		};
+
+		if bytes[0] != 1 {
+			return parse(false);
+		}
+
+		let standard = parse(false);
+		let legacy_rgb = parse(true);
+		match (standard, legacy_rgb) {
+			(Ok(standard), Err(_)) => Ok(standard),
+			(Err(_), Ok(legacy_rgb)) => Ok(legacy_rgb),
+			(Err(standard_error), Err(_)) => Err(standard_error),
+			(Ok(standard), Ok(legacy_rgb)) => {
+				let equivalent = match (&standard, &legacy_rgb) {
+					(None, None) => true,
+					(Some((standard_hash, standard_monitor)), Some((rgb_hash, rgb_monitor))) => {
+						standard_hash == rgb_hash
+							&& standard_monitor.encode() == rgb_monitor.encode()
+					},
+					_ => false,
+				};
+				if equivalent {
+					Ok(standard)
+				} else {
+					Err(DecodeError::InvalidValue)
+				}
+			},
+		}
+	}
+}
+
+#[rustfmt::skip]
+fn read_channel_monitor<'a, 'b, R: io::Read, ES: EntropySource, SP: SignerProvider>(
+	reader: &mut R, args: (&'a ES, &'b SP), legacy_rgb_layout: bool,
+) -> Result<Option<(BlockHash, ChannelMonitor<SP::EcdsaSigner>)>, DecodeError> {
 		macro_rules! unwrap_obj {
 			($key: expr) => {
 				match $key {
@@ -6447,7 +6498,7 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 
 		let (entropy_source, signer_provider) = args;
 
-		let _ver = read_ver_prefix!(reader, SERIALIZATION_VERSION);
+		let serialization_version = read_ver_prefix!(reader, SERIALIZATION_VERSION);
 
 		let latest_update_id: u64 = Readable::read(reader)?;
 		let commitment_transaction_number_obscure_factor = <U48 as Readable>::read(reader)?.0;
@@ -6512,7 +6563,11 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 					let cltv_expiry: u32 = Readable::read(reader)?;
 					let payment_hash: PaymentHash = Readable::read(reader)?;
 					let transaction_output_index: Option<u32> = Readable::read(reader)?;
-                    let rgb_payment: Option<(ContractId, u64)> = Readable::read(reader)?;
+					let rgb_payment: Option<(ContractId, u64)> = if serialization_version >= 2 || legacy_rgb_layout {
+						Readable::read(reader)?
+					} else {
+						None
+					};
 
 					HTLCOutputInCommitment {
 						offered, amount_msat, cltv_expiry, payment_hash, transaction_output_index, rgb_payment
@@ -6859,7 +6914,6 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 			}
 		}
 		Ok(Some((best_block.block_hash, monitor)))
-	}
 }
 
 #[cfg(test)]
@@ -6880,6 +6934,7 @@ mod tests {
 	use bitcoin::transaction::OutPoint as BitcoinOutPoint;
 	use bitcoin::transaction::{Transaction, TxIn, TxOut, Version};
 	use bitcoin::{Sequence, Witness};
+	use rgb_lib::ContractId;
 
 	use crate::chain::chaininterface::LowerBoundedFeeEstimator;
 	use crate::events::ClosureReason;
@@ -6922,6 +6977,65 @@ mod tests {
 	use crate::prelude::*;
 
 	use std::str::FromStr;
+
+	#[test]
+	fn reads_standard_and_utexo_v1_monitor_layouts() {
+		let chanmon_cfgs = create_chanmon_cfgs(2);
+		let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+		let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
+		let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+		let (_, _, channel_id, _) =
+			create_announced_chan_between_nodes_with_value(&nodes, 0, 1, 100_000, 50_000_000);
+		route_payment(&nodes[0], &[&nodes[1]], 10_000_000);
+
+		let monitor = get_monitor!(nodes[0], channel_id);
+		let contract_id = ContractId::copy_from_slice(&[42; 32]).unwrap();
+		let mut updated_htlc = false;
+		{
+			let mut inner = monitor.inner.lock().unwrap();
+			for htlcs in inner.funding.counterparty_claimable_outpoints.values_mut() {
+				for (htlc, _) in htlcs {
+					htlc.rgb_payment = Some((contract_id, 123));
+					updated_htlc = true;
+				}
+			}
+		}
+		assert!(updated_htlc);
+
+		let current_bytes = monitor.encode();
+		assert_eq!(&current_bytes[..2], &[2, 1]);
+		let (_, current_monitor) = <(BlockHash, ChannelMonitor<_>)>::read(
+			&mut io::Cursor::new(&current_bytes),
+			(&nodes[0].keys_manager.backing, &nodes[0].keys_manager.backing),
+		)
+		.unwrap();
+		assert!(current_monitor
+			.inner
+			.lock()
+			.unwrap()
+			.funding
+			.counterparty_claimable_outpoints
+			.values()
+			.flatten()
+			.any(|(htlc, _)| htlc.rgb_payment == Some((contract_id, 123))));
+
+		let mut legacy_utexo_bytes = current_bytes;
+		legacy_utexo_bytes[0] = 1;
+		let (_, legacy_monitor) = <(BlockHash, ChannelMonitor<_>)>::read(
+			&mut io::Cursor::new(&legacy_utexo_bytes),
+			(&nodes[0].keys_manager.backing, &nodes[0].keys_manager.backing),
+		)
+		.unwrap();
+		assert!(legacy_monitor
+			.inner
+			.lock()
+			.unwrap()
+			.funding
+			.counterparty_claimable_outpoints
+			.values()
+			.flatten()
+			.any(|(htlc, _)| htlc.rgb_payment == Some((contract_id, 123))));
+	}
 
 	#[rustfmt::skip]
 	fn do_test_funding_spend_refuses_updates(use_local_txn: bool) {
@@ -7050,6 +7164,7 @@ mod tests {
 					let mut res = Vec::new();
 					for (idx, preimage) in $preimages_slice.iter().enumerate() {
 						res.push(HTLCOutputInCommitment {
+							rgb_payment: None,
 							offered: true,
 							amount_msat: 0,
 							cltv_expiry: 0,
@@ -7204,6 +7319,7 @@ mod tests {
 		macro_rules! sign_input {
 			($sighash_parts: expr, $idx: expr, $amount: expr, $weight: expr, $sum_actual_sigs: expr, $opt_anchors: expr) => {
 				let htlc = HTLCOutputInCommitment {
+					rgb_payment: None,
 					offered: if *$weight == weight_revoked_offered_htlc($opt_anchors) || *$weight == weight_offered_htlc($opt_anchors) { true } else { false },
 					amount_msat: 0,
 					cltv_expiry: 2 << 16,

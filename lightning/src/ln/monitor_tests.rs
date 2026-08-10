@@ -2290,16 +2290,16 @@ fn do_test_claimable_balance_correct_while_payment_pending(outbound_payment: boo
 		assert_eq!(
 			1_000_000 - commitment_tx_fee - anchor_outputs_value - 4_001 /* Note HTLC timeout amount of 4001 sats is excluded for outbound payment */,
 			nodes[0].chain_monitor.chain_monitor.get_monitor(chan_ab_id).unwrap().get_claimable_balances().iter().map(
-				|x| x.claimable_amount_satoshis()).sum());
+				|x| x.claimable_amount_satoshis()).sum::<u64>());
 	} else {
 		assert_eq!(
 			0u64,
 			nodes[1].chain_monitor.chain_monitor.get_monitor(chan_ab_id).unwrap().get_claimable_balances().iter().map(
-				|x| x.claimable_amount_satoshis()).sum());
+				|x| x.claimable_amount_satoshis()).sum::<u64>());
 		assert_eq!(
 			1_000_000 - commitment_tx_fee - anchor_outputs_value /* Note HTLC timeout amount of 4000 sats is included */,
 			nodes[1].chain_monitor.chain_monitor.get_monitor(chan_bc_id).unwrap().get_claimable_balances().iter().map(
-				|x| x.claimable_amount_satoshis()).sum());
+				|x| x.claimable_amount_satoshis()).sum::<u64>());
 	}
 }
 

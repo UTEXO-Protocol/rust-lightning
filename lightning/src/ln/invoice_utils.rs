@@ -1305,7 +1305,7 @@ mod test {
 		.unwrap()
 		.with_route_hints(invoice.route_hints())
 		.unwrap();
-		let params = RouteParameters::from_payment_params_and_value(
+		let params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params,
 			invoice.amount_milli_satoshis().unwrap(),
 		);

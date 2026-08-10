@@ -19,8 +19,8 @@ use crate::events::{
 };
 use crate::ln::blinded_payment_tests::{fail_blinded_htlc_backwards, get_blinded_route_parameters};
 use crate::ln::channelmanager::{
-	Bolt12PaymentError, OptionalOfferPaymentParams, PaymentId, RecipientOnionFields,
-	MIN_CLTV_EXPIRY_DELTA,
+	Bolt12PaymentError, NextHopForward, OptionalOfferPaymentParams, PaymentId,
+	RecipientOnionFields, MIN_CLTV_EXPIRY_DELTA,
 };
 use crate::ln::functional_test_utils::*;
 use crate::ln::inbound_payment;
@@ -269,9 +269,15 @@ fn pass_async_payments_oms(
 	(held_htlc_available_om_1_2, release_held_htlc)
 }
 
-fn create_static_invoice_builder<'a>(
-	recipient: &Node, offer: &'a Offer, offer_nonce: Nonce, relative_expiry: Option<Duration>,
-) -> StaticInvoiceBuilder<'a> {
+fn create_static_invoice_builder<'a, 'chan_man, 'node_cfg, 'chan_mon_cfg>(
+	recipient: &'a Node<'chan_man, 'node_cfg, 'chan_mon_cfg>, offer: &'a Offer, offer_nonce: Nonce,
+	relative_expiry: Option<Duration>,
+) -> StaticInvoiceBuilder<'a>
+where
+	'chan_man: 'a,
+	'node_cfg: 'a,
+	'chan_mon_cfg: 'a,
+{
 	let entropy = recipient.keys_manager;
 	let amount_msat = offer.amount().and_then(|amount| match amount {
 		Amount::Bitcoin { amount_msats } => Some(amount_msats),
@@ -317,7 +323,7 @@ fn create_static_invoice<T: secp256k1::Signing + secp256k1::Verification>(
 		.message_router
 		.create_blinded_paths(
 			always_online_counterparty.node.get_our_node_id(),
-			always_online_counterparty.keys_manager.get_receive_auth_key(),
+			&always_online_counterparty.keys_manager,
 			MessageContext::Offers(OffersContext::InvoiceRequest { nonce: Nonce([42; 16]) }),
 			Vec::new(),
 			&secp_ctx,
@@ -684,7 +690,7 @@ fn static_invoice_unknown_required_features() {
 		.message_router
 		.create_blinded_paths(
 			nodes[1].node.get_our_node_id(),
-			nodes[1].keys_manager.get_receive_auth_key(),
+			&nodes[1].keys_manager,
 			MessageContext::Offers(OffersContext::InvoiceRequest { nonce: Nonce([42; 16]) }),
 			Vec::new(),
 			&secp_ctx,
@@ -1657,7 +1663,7 @@ fn invalid_async_receive_with_retry<F1, F2>(
 		.message_router
 		.create_blinded_paths(
 			nodes[1].node.get_our_node_id(),
-			nodes[1].keys_manager.get_receive_auth_key(),
+			&nodes[1].keys_manager,
 			MessageContext::Offers(OffersContext::InvoiceRequest { nonce: Nonce([42; 16]) }),
 			Vec::new(),
 			&secp_ctx,
@@ -3248,9 +3254,10 @@ fn intercepted_hold_htlc() {
 	lsp.node
 		.forward_intercepted_htlc(
 			intercept_id,
-			&chan_id,
+			NextHopForward::ChannelId(recipient.node.get_our_node_id(), &chan_id),
 			recipient.node.get_our_node_id(),
 			outbound_amt,
+			None,
 		)
 		.unwrap();
 	lsp.node.process_pending_htlc_forwards();

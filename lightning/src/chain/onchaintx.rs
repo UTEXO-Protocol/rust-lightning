@@ -1354,6 +1354,7 @@ mod tests {
 			let hash = PaymentHash(Sha256::hash(&preimage.0[..]).to_byte_array());
 			nondust_htlcs.push(
 				HTLCOutputInCommitment {
+					rgb_payment: None,
 					offered: true,
 					amount_msat: 10000,
 					cltv_expiry: i as u32,

@@ -35,11 +35,25 @@ use crate::prelude::*;
 /// ## Example
 /// ```
 /// use lightning::ln::our_peer_storage::DecryptedOurPeerStorage;
+/// use lightning::io;
 /// use lightning::sign::{KeysManager, NodeSigner};
 /// use lightning::util::persist::KVStoreSync;
 /// use std::sync::Arc;
+/// # struct NoopStore;
+/// # impl KVStoreSync for NoopStore {
+/// #     fn read(&self, _: &str, _: &str, _: &str) -> Result<Vec<u8>, io::Error> {
+/// #         Err(io::ErrorKind::NotFound.into())
+/// #     }
+/// #     fn write(&self, _: &str, _: &str, _: &str, _: Vec<u8>) -> Result<(), io::Error> {
+/// #         Ok(())
+/// #     }
+/// #     fn remove(&self, _: &str, _: &str, _: &str, _: bool) -> Result<(), io::Error> {
+/// #         Ok(())
+/// #     }
+/// #     fn list(&self, _: &str, _: &str) -> Result<Vec<String>, io::Error> { Ok(vec![]) }
+/// # }
 /// let seed = [1u8; 32];
-/// let kv_store: Arc<dyn KVStoreSync + Send + Sync> = Arc::new(lightning::util::test_utils::TestStore::new(false));
+/// let kv_store: Arc<dyn KVStoreSync + Send + Sync> = Arc::new(NoopStore);
 /// let keys_mgr = KeysManager::new(&seed, 42, 42, true, std::path::PathBuf::from("/tmp/ldk_test"), kv_store);
 /// let key = keys_mgr.get_peer_storage_key();
 /// let decrypted_ops = DecryptedOurPeerStorage::new(vec![1, 2, 3]);

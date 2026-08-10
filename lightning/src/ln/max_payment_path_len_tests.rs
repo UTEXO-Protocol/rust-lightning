@@ -60,6 +60,7 @@ fn large_payment_metadata() {
 	// Construct payment_metadata such that we can send the payment to the next hop but no further
 	// without exceeding the max onion packet size.
 	let final_payload_len_without_metadata = msgs::OutboundOnionPayload::Receive {
+		rgb_payment_to_forward: None,
 		payment_data: Some(msgs::FinalOnionHopData {
 			payment_secret: PaymentSecret([0; 32]),
 			total_msat: MIN_FINAL_VALUE_ESTIMATE_WITH_OVERPAY,
@@ -235,7 +236,7 @@ fn one_hop_blinded_path_with_custom_tlv() {
 		&secp_ctx,
 	)
 	.unwrap();
-	let route_params = RouteParameters::from_payment_params_and_value(
+	let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 		PaymentParameters::blinded(vec![blinded_path.clone()]),
 		amt_msat,
 	);
@@ -243,6 +244,7 @@ fn one_hop_blinded_path_with_custom_tlv() {
 	// Calculate the maximum custom TLV value size where a valid onion packet is still possible.
 	const CUSTOM_TLV_TYPE: u64 = 65537;
 	let final_payload_len_without_custom_tlv = msgs::OutboundOnionPayload::BlindedReceive {
+		rgb_payment_to_forward: None,
 		sender_intended_htlc_amt_msat: MIN_FINAL_VALUE_ESTIMATE_WITH_OVERPAY,
 		total_msat: MIN_FINAL_VALUE_ESTIMATE_WITH_OVERPAY,
 		cltv_expiry_height: nodes[0].best_block_info().1 + DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA,

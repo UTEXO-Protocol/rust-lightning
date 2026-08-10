@@ -283,21 +283,33 @@ const COMMITMENT_TX_WEIGHT_PER_HTLC: u64 = 172;
 #[cfg(any(test, feature = "_test_utils"))]
 pub const COMMITMENT_TX_WEIGHT_PER_HTLC: u64 = 172;
 
+/// The weight of the additional OP_RETURN output committed to by an RGB commitment transaction.
+pub(crate) const RGB_COMMITMENT_TX_OUTPUT_WEIGHT: u64 = 172;
+
 #[rustfmt::skip]
 pub(crate) fn commitment_tx_base_weight(channel_type_features: &ChannelTypeFeatures) -> u64 {
+	commitment_tx_base_weight_with_rgb(channel_type_features, false)
+}
+
+#[rustfmt::skip]
+pub(crate) fn commitment_tx_base_weight_with_rgb(channel_type_features: &ChannelTypeFeatures, is_colored: bool) -> u64 {
 	const COMMITMENT_TX_BASE_WEIGHT: u64 = 724;
 	const COMMITMENT_TX_BASE_ANCHOR_WEIGHT: u64 = 1124;
 	let base_weight = if channel_type_features.supports_anchors_zero_fee_htlc_tx() { COMMITMENT_TX_BASE_ANCHOR_WEIGHT } else { COMMITMENT_TX_BASE_WEIGHT };
-	// add OP_RETURN weight (RGB coloring)
-	base_weight + 172
+	base_weight + if is_colored { RGB_COMMITMENT_TX_OUTPUT_WEIGHT } else { 0 }
 }
 
 /// Get the fee cost of a commitment tx with a given number of HTLC outputs.
 /// Note that num_htlcs should not include dust HTLCs.
 #[rustfmt::skip]
 pub(crate) fn commit_tx_fee_sat(feerate_per_kw: u32, num_htlcs: usize, channel_type_features: &ChannelTypeFeatures) -> u64 {
+	commit_tx_fee_sat_with_rgb(feerate_per_kw, num_htlcs, channel_type_features, false)
+}
+
+#[rustfmt::skip]
+pub(crate) fn commit_tx_fee_sat_with_rgb(feerate_per_kw: u32, num_htlcs: usize, channel_type_features: &ChannelTypeFeatures, is_colored: bool) -> u64 {
 	feerate_per_kw as u64 *
-		(commitment_tx_base_weight(channel_type_features) +
+		(commitment_tx_base_weight_with_rgb(channel_type_features, is_colored) +
 			num_htlcs as u64 * COMMITMENT_TX_WEIGHT_PER_HTLC)
 		/ 1000
 }
@@ -2367,7 +2379,6 @@ pub fn get_commitment_transaction_number_obscure_factor(
 		| ((res[31] as u64) << 0 * 8)
 }
 
-/*
 #[cfg(test)]
 mod tests {
 	use super::{ChannelPublicKeys, CounterpartyCommitmentSecrets};
@@ -2503,6 +2514,7 @@ mod tests {
 		assert_eq!(tx.built.transaction.output[0].value.to_sat(), 240); // remember total channel value is 4000sat
 
 		let received_htlc = HTLCOutputInCommitment {
+			rgb_payment: None,
 			offered: false,
 			amount_msat: 400000,
 			cltv_expiry: 100,
@@ -2511,6 +2523,7 @@ mod tests {
 		};
 
 		let offered_htlc = HTLCOutputInCommitment {
+			rgb_payment: None,
 			offered: true,
 			amount_msat: 600000,
 			cltv_expiry: 100,
@@ -3072,6 +3085,7 @@ mod tests {
 
 		// script_pubkey: Script(OP_0 OP_PUSHBYTES_32 1b202f6bdf42cd8ba08e263868b5bd0cf5a7f95c227c27e1935984a8f6130fa3)
 		let small_htlc = HTLCOutputInCommitment {
+			rgb_payment: None,
 			offered: true,
 			amount_msat: 10_000,
 			cltv_expiry: 123,
@@ -3103,4 +3117,3 @@ mod tests {
 		swap_htlcs!(small_htlc, big_htlc);
 	}
 }
-*/

@@ -119,7 +119,10 @@ use crate::onion_message::messenger::{
 	MessageRouter, MessageSendInstructions, Responder, ResponseInstruction,
 };
 use crate::onion_message::offers::{OffersMessage, OffersMessageHandler};
-use crate::rgb_utils::{handle_funding, is_channel_rgb, RgbKvStoreExt};
+use crate::rgb_utils::{
+	abort_prepared_funding, finalize_funding, is_channel_rgb, prepare_funding, promote_funding,
+	reconcile_pending_funding_acceptances, rename_rgb_files, rollback_funding, RgbKvStoreExt,
+};
 use crate::routing::router::{
 	BlindedTail, FixedRouter, InFlightHtlcs, Path, Payee, PaymentParameters, Route,
 	RouteParameters, RouteParametersConfig, Router,
@@ -189,7 +192,7 @@ use core::borrow::Borrow;
 use core::cell::RefCell;
 use core::convert::Infallible;
 use core::ops::Deref;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 use core::{cmp, mem};
 // Re-export this for use in the public API.
@@ -200,12 +203,18 @@ pub use crate::ln::outbound_payment::{
 	RetryableSendFailure,
 };
 use crate::ln::script::ShutdownScript;
+#[cfg(any(test, feature = "_rln_test_hooks"))]
+use crate::util::mut_global::MutGlobal;
 
 /// Test-only hook: if set to a node's pubkey, that node will drop outgoing
 /// `funding_signed` messages (sending an `ErrorMessage` instead) in its
 /// `internal_funding_created` handler.
 #[cfg(any(test, feature = "_rln_test_hooks"))]
-pub static DROP_FUNDING_SIGNED_ON_NODE: Mutex<Option<PublicKey>> = Mutex::new(None);
+pub static DROP_FUNDING_SIGNED_ON_NODE: MutGlobal<Option<PublicKey>> = MutGlobal::new(|| None);
+
+/// Aborts the next RGB funding acceptance immediately after its isolated stock is prepared.
+#[cfg(any(test, feature = "_rln_test_hooks"))]
+pub static ABORT_NEXT_RGB_FUNDING_AFTER_PREPARE: AtomicBool = AtomicBool::new(false);
 
 // We hold various information about HTLC relay in the HTLC objects in Channel itself:
 //
@@ -1410,6 +1419,18 @@ pub(crate) enum MonitorUpdateCompletionAction {
 		blocking_action: RAAMonitorUpdateBlockingAction,
 		downstream_channel_id: ChannelId,
 	},
+	/// Finalizes a staged RGB funding acceptance and only then releases `funding_signed`.
+	FinalizeRgbFunding {
+		temporary_channel_id: String,
+		counterparty_node_id: PublicKey,
+		funding_signed: msgs::FundingSigned,
+	},
+	/// Finalizes a staged RGB funding acceptance while the initial commitment signature remains
+	/// pending. The signature may only be generated after the initial monitor is durable.
+	FinalizeRgbFundingAwaitingSigner {
+		temporary_channel_id: String,
+		counterparty_node_id: PublicKey,
+	},
 }
 
 impl_writeable_tlv_based_enum_upgradable!(MonitorUpdateCompletionAction,
@@ -1432,6 +1453,15 @@ impl_writeable_tlv_based_enum_upgradable!(MonitorUpdateCompletionAction,
 		// support async monitor updates even in LDK 0.0.116 and once we do we'll require no
 		// downgrades to prior versions.
 		(1, downstream_counterparty_and_funding_outpoint, upgradable_option),
+	},
+	(4, FinalizeRgbFunding) => {
+		(0, temporary_channel_id, required),
+		(2, counterparty_node_id, required),
+		(4, funding_signed, required),
+	},
+	(6, FinalizeRgbFundingAwaitingSigner) => {
+		(0, temporary_channel_id, required),
+		(2, counterparty_node_id, required),
 	},
 );
 
@@ -1621,6 +1651,11 @@ where
 	pub(super) inbound_channel_request_by_id: HashMap<ChannelId, InboundChannelRequest>,
 	/// The latest `InitFeatures` we heard from the peer.
 	latest_features: InitFeatures,
+	/// Monotonically identifies the active transport session for this peer.
+	///
+	/// Long-running protocol work may release the peer mutex. It must not attach state created for an
+	/// old connection to a replacement connection that happened to arrive in the meantime.
+	connection_epoch: u64,
 	/// Messages to send to the peer - pushed to in the same lock that they are generated in (except
 	/// for broadcast messages, where ordering isn't as strict).
 	pub(super) pending_msg_events: Vec<MessageSendEvent>,
@@ -2032,7 +2067,7 @@ where
 /// let channel_manager = ChannelManager::new(
 ///     fee_estimator, chain_monitor, tx_broadcaster, router, message_router, logger,
 ///     entropy_source, node_signer, signer_provider, config.clone(), params, current_timestamp,
-///     ldk_data_dir, rgb_kv_store,
+///     ldk_data_dir.clone(), rgb_kv_store.clone(),
 /// );
 ///
 /// // Restart from deserialized data
@@ -2124,7 +2159,7 @@ where
 /// # let channel_manager = channel_manager.get_cm();
 /// let value_sats = 1_000_000;
 /// let push_msats = 10_000_000;
-/// match channel_manager.create_channel(peer_id, value_sats, push_msats, 42, None, None, None, None, false) {
+/// match channel_manager.create_channel(peer_id, value_sats, push_msats, 42, None, None) {
 ///     Ok(channel_id) => println!("Opening channel {}", channel_id),
 ///     Err(e) => println!("Error opening channel: {:?}", e),
 /// }
@@ -2879,6 +2914,10 @@ pub struct ChannelManager<
 	per_peer_state: FairRwLock<HashMap<PublicKey, Mutex<PeerState<SP>>>>,
 	#[cfg(any(test, feature = "_test_utils"))]
 	pub(super) per_peer_state: FairRwLock<HashMap<PublicKey, Mutex<PeerState<SP>>>>,
+	/// Allocates process-local transport generations that never repeat when a peer entry is removed
+	/// and later recreated. In-flight protocol work does not survive process restart, so this value
+	/// intentionally does not participate in `ChannelManager` serialization.
+	peer_connection_epoch_counter: AtomicU64,
 
 	/// We only support using one of [`ChannelMonitorUpdateStatus::InProgress`] and
 	/// [`ChannelMonitorUpdateStatus::Completed`] without restarting. Because the API does not
@@ -3622,6 +3661,41 @@ macro_rules! handle_monitor_update_completion {
 
 		let update_actions = $peer_state.monitor_update_blocked_actions
 			.remove(&channel_id).unwrap_or(Vec::new());
+		let mut deferred_update_actions = Vec::with_capacity(update_actions.len());
+		for action in update_actions {
+			match action {
+				MonitorUpdateCompletionAction::FinalizeRgbFunding {
+					temporary_channel_id,
+					counterparty_node_id: action_counterparty_node_id,
+					funding_signed,
+				} => {
+					if action_counterparty_node_id != counterparty_node_id {
+						panic!("RGB funding completion action belongs to a different peer");
+					}
+					$self.finalize_rgb_funding_after_monitor_persist(&temporary_channel_id);
+					$self.enqueue_funding_signed(
+						&mut $peer_state.pending_msg_events,
+						counterparty_node_id,
+						funding_signed,
+					);
+					$self.needs_persist_flag.store(true, Ordering::Release);
+					$self.event_persist_notifier.notify();
+				},
+				MonitorUpdateCompletionAction::FinalizeRgbFundingAwaitingSigner {
+					temporary_channel_id,
+					counterparty_node_id: action_counterparty_node_id,
+				} => {
+					if action_counterparty_node_id != counterparty_node_id {
+						panic!("RGB funding completion action belongs to a different peer");
+					}
+					$self.finalize_rgb_funding_after_monitor_persist(&temporary_channel_id);
+					$self.needs_persist_flag.store(true, Ordering::Release);
+					$self.event_persist_notifier.notify();
+				},
+				other => deferred_update_actions.push(other),
+			}
+		}
+		let update_actions = deferred_update_actions;
 
 		if $chan.blocked_monitor_updates_pending() != 0 {
 			mem::drop($peer_state_lock);
@@ -3641,6 +3715,13 @@ macro_rules! handle_monitor_update_completion {
 					$self.path_for_release_held_htlc(htlc_id, outbound_scid_alias, &channel_id, &counterparty_node_id)
 				},
 			);
+			if let Some(funding_signed) = updates.funding_signed.take() {
+				$self.enqueue_funding_signed(
+					&mut $peer_state.pending_msg_events,
+					counterparty_node_id,
+					funding_signed,
+				);
+			}
 			let channel_update = if updates.channel_ready.is_some()
 				&& $chan.context.is_usable()
 				&& $peer_state.is_connected
@@ -4021,6 +4102,10 @@ where
 			our_network_pubkey, current_timestamp,
 			node_signer.clone(), secp_ctx.clone(), message_router, logger.clone(),
 		);
+		reconcile_pending_funding_acceptances(&[], &ldk_data_dir, rgb_kv_store.as_ref())
+			.unwrap_or_else(|error| {
+				panic!("Failed to reconcile interrupted RGB funding before startup: {error:?}")
+			});
 
 		ChannelManager {
 			config: RwLock::new(config),
@@ -4034,7 +4119,7 @@ where
 			best_block: RwLock::new(params.best_block),
 
 			outbound_scid_aliases: Mutex::new(new_hash_set()),
-			pending_outbound_payments: OutboundPayments::new(new_hash_map(), Arc::clone(&rgb_kv_store)),
+			pending_outbound_payments: OutboundPayments::new_with_rgb_store(new_hash_map(), Arc::clone(&rgb_kv_store)),
 			forward_htlcs: Mutex::new(new_hash_map()),
 			decode_update_add_htlcs: Mutex::new(new_hash_map()),
 			claimable_payments: Mutex::new(ClaimablePayments { claimable_payments: new_hash_map(), pending_claiming_payments: new_hash_map() }),
@@ -4050,7 +4135,8 @@ where
 
 			highest_seen_timestamp: AtomicUsize::new(current_timestamp as usize),
 
-			per_peer_state: FairRwLock::new(new_hash_map()),
+				per_peer_state: FairRwLock::new(new_hash_map()),
+				peer_connection_epoch_counter: AtomicU64::new(1),
 
 			#[cfg(not(any(test, feature = "_externalize_tests")))]
 			monitor_update_type: AtomicUsize::new(0),
@@ -4093,6 +4179,78 @@ where
 	/// default configuration applied to all new channels.
 	pub fn set_current_config(&self, new_config: UserConfig) {
 		*self.config.write().unwrap() = new_config;
+	}
+
+	fn next_peer_connection_epoch(&self) -> u64 {
+		let mut epoch = self.peer_connection_epoch_counter.load(Ordering::Relaxed);
+		loop {
+			let next_epoch = epoch.checked_add(1).expect("peer connection epoch exhausted");
+			match self.peer_connection_epoch_counter.compare_exchange_weak(
+				epoch,
+				next_epoch,
+				Ordering::Relaxed,
+				Ordering::Relaxed,
+			) {
+				Ok(_) => return epoch,
+				Err(actual_epoch) => epoch = actual_epoch,
+			}
+		}
+	}
+
+	fn enqueue_funding_signed(
+		&self, pending_msg_events: &mut Vec<MessageSendEvent>, counterparty_node_id: PublicKey,
+		msg: msgs::FundingSigned,
+	) {
+		#[cfg(any(test, feature = "_rln_test_hooks"))]
+		let drop_funding_signed = DROP_FUNDING_SIGNED_ON_NODE
+			.get()
+			.as_ref()
+			.map_or(false, |id| *id == self.get_our_node_id());
+		#[cfg(not(any(test, feature = "_rln_test_hooks")))]
+		let drop_funding_signed = false;
+
+		if drop_funding_signed {
+			log_error!(
+				self.logger,
+				"TEST: dropping funding_signed for channel {}, sending error instead",
+				msg.channel_id
+			);
+			pending_msg_events.push(MessageSendEvent::HandleError {
+				node_id: counterparty_node_id,
+				action: msgs::ErrorAction::SendErrorMessage {
+					msg: msgs::ErrorMessage {
+						channel_id: msg.channel_id,
+						data: "TEST: funding_signed dropped".to_owned(),
+					},
+				},
+			});
+		} else {
+			pending_msg_events
+				.push(MessageSendEvent::SendFundingSigned { node_id: counterparty_node_id, msg });
+		}
+	}
+
+	fn finalize_rgb_funding_after_monitor_persist(&self, temporary_channel_id: &str) {
+		if let Err(error) =
+			finalize_funding(temporary_channel_id, &self.ldk_data_dir, self.rgb_kv_store.as_ref())
+		{
+			log_error!(
+				self.logger,
+				"Fail-stop while finalizing RGB funding {}: {:?}",
+				temporary_channel_id,
+				error
+			);
+			panic!("Initial channel monitor is durable but RGB funding finalization failed");
+		}
+	}
+
+	/// Returns the active peer transport epoch for integration tests.
+	#[cfg(feature = "_rln_test_hooks")]
+	pub fn peer_connection_epoch_for_test(&self, counterparty_node_id: &PublicKey) -> Option<u64> {
+		let per_peer_state = self.per_peer_state.read().unwrap();
+		per_peer_state
+			.get(counterparty_node_id)
+			.map(|peer_state| peer_state.lock().unwrap().connection_epoch)
 	}
 
 	#[cfg(test)]
@@ -4162,7 +4320,13 @@ where
 	/// [`Event::FundingGenerationReady::temporary_channel_id`]: events::Event::FundingGenerationReady::temporary_channel_id
 	/// [`Event::ChannelClosed::channel_id`]: events::Event::ChannelClosed::channel_id
 	#[rustfmt::skip]
-	pub fn create_channel(&self, their_network_key: PublicKey, channel_value_satoshis: u64, push_msat: u64, user_channel_id: u128, temporary_channel_id: Option<ChannelId>, override_config: Option<UserConfig>, consignment_endpoint: Option<RgbTransport>, push_asset_amount: Option<u64>, is_virtual: bool) -> Result<ChannelId, APIError> {
+	pub fn create_channel(&self, their_network_key: PublicKey, channel_value_satoshis: u64, push_msat: u64, user_channel_id: u128, temporary_channel_id: Option<ChannelId>, override_config: Option<UserConfig>) -> Result<ChannelId, APIError> {
+		self.create_rgb_channel(their_network_key, channel_value_satoshis, push_msat, user_channel_id, temporary_channel_id, override_config, None, None, false)
+	}
+
+	/// Creates a channel with optional RGB funding metadata.
+	#[rustfmt::skip]
+	pub fn create_rgb_channel(&self, their_network_key: PublicKey, channel_value_satoshis: u64, push_msat: u64, user_channel_id: u128, temporary_channel_id: Option<ChannelId>, override_config: Option<UserConfig>, consignment_endpoint: Option<RgbTransport>, push_asset_amount: Option<u64>, is_virtual: bool) -> Result<ChannelId, APIError> {
 		if channel_value_satoshis < 1000 {
 			return Err(APIError::APIMisuseError { err: format!("Channel value must be at least 1000 satoshis. It was {}", channel_value_satoshis) });
 		}
@@ -4196,7 +4360,7 @@ where
 			} else {
 				&*config
 			};
-			match OutboundV1Channel::new(&self.fee_estimator, &self.entropy_source, &self.signer_provider, their_network_key,
+			match OutboundV1Channel::new_with_rgb(&self.fee_estimator, &self.entropy_source, &self.signer_provider, their_network_key,
 				their_features, channel_value_satoshis, push_msat, user_channel_id, config,
 				self.best_block.read().unwrap().height, outbound_scid_alias, temporary_channel_id, &*self.logger, consignment_endpoint, self.ldk_data_dir.clone(), push_asset_amount,
 				Arc::clone(&self.rgb_kv_store))
@@ -4270,6 +4434,16 @@ where
 			}
 		}
 		res
+	}
+
+	/// Gets the list of channels which have completed the funding handshake, in random order.
+	///
+	/// Unlike [`Self::list_channels`], this excludes channels which have only negotiated or been
+	/// assigned a funding outpoint but have not yet received the counterparty's funding signature.
+	/// This distinction is useful when deciding whether recovery may rely on the channel's funded
+	/// state.
+	pub fn list_funded_channels(&self) -> Vec<ChannelDetails> {
+		self.list_funded_channels_with_filter(|_| true)
 	}
 
 	/// Gets the list of open channels, in random order. See [`ChannelDetails`] field documentation for
@@ -4822,18 +4996,20 @@ where
 	pub fn force_close_broadcasting_latest_txn(
 		&self, channel_id: &ChannelId, counterparty_node_id: &PublicKey, error_message: String,
 	) -> Result<(), APIError> {
-		let per_peer_state = self.per_peer_state.read().unwrap();
-		if let Some(peer_state_mutex) = per_peer_state.get(counterparty_node_id) {
-			let peer_state = peer_state_mutex.lock().unwrap();
-			if peer_state
-				.channel_by_id
-				.get(channel_id)
-				.is_some_and(|chan| chan.context().is_trusted_no_broadcast())
-			{
-				return Err(APIError::APIMisuseError {
-					err: "trusted no-broadcast channels must use abandon_virtual_channel"
-						.to_owned(),
-				});
+		{
+			let per_peer_state = self.per_peer_state.read().unwrap();
+			if let Some(peer_state_mutex) = per_peer_state.get(counterparty_node_id) {
+				let peer_state = peer_state_mutex.lock().unwrap();
+				if peer_state
+					.channel_by_id
+					.get(channel_id)
+					.is_some_and(|chan| chan.context().is_trusted_no_broadcast())
+				{
+					return Err(APIError::APIMisuseError {
+						err: "trusted no-broadcast channels must use abandon_virtual_channel"
+							.to_owned(),
+					});
+				}
 			}
 		}
 		self.force_close_sending_error(channel_id, counterparty_node_id, error_message)
@@ -5582,7 +5758,7 @@ where
 				.and_then(|path| path.hops.last().map(|hop| (hop.pubkey, hop.cltv_expiry_delta as u32)))
 				.unwrap_or_else(|| (PublicKey::from_slice(&[2; 32]).unwrap(), MIN_FINAL_CLTV_EXPIRY_DELTA as u32));
 			let dummy_payment_params = PaymentParameters::from_node_id(payee_node_id, cltv_delta);
-			RouteParameters::from_payment_params_and_value(dummy_payment_params, route.get_total_amount(), None)
+			RouteParameters::from_payment_params_and_value_without_rgb(dummy_payment_params, route.get_total_amount())
 		});
 		if route.route_params.is_none() { route.route_params = Some(route_params.clone()); }
 		let router = FixedRouter::new(route);
@@ -6167,7 +6343,7 @@ where
 		let payment_params = PaymentParameters::from_node_id(node_id, final_cltv_expiry_delta);
 
 		let route_params =
-			RouteParameters::from_payment_params_and_value(payment_params, amount_msat, None);
+			RouteParameters::from_payment_params_and_value_without_rgb(payment_params, amount_msat);
 
 		self.send_preflight_probes(route_params, liquidity_limit_multiplier)
 	}
@@ -6346,10 +6522,23 @@ where
 				let api_err = APIError::APIMisuseError { err: err.to_owned() };
 				return abandon_chan!(chan_err, api_err, chan);
 			},
-		};
+			};
 
-		let logger = WithChannelContext::from(&self.logger, &chan.context, None);
-		let funding_res = chan.get_funding_created(funding_transaction, funding_txo, is_batch_funding, &&logger);
+			let logger = WithChannelContext::from(&self.logger, &chan.context, None);
+			if chan.context.is_colored() {
+				let channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
+				if let Err(error) = rename_rgb_files(
+					&channel_id,
+					&temporary_channel_id,
+					chan.context.rgb_kv_store.as_ref(),
+				) {
+					let err = format!("Failed to persist RGB channel ID transition: {error}");
+					let chan_err = ChannelError::close(err.clone());
+					let api_err = APIError::ChannelUnavailable { err };
+					return abandon_chan!(chan_err, api_err, chan);
+				}
+			}
+			let funding_res = chan.get_funding_created(funding_transaction, funding_txo, is_batch_funding, &&logger);
 		let (mut chan, msg_opt) = match funding_res {
 			Ok(funding_msg) => (chan, funding_msg),
 			Err((mut chan, chan_err)) => {
@@ -9178,7 +9367,8 @@ where
 		ComplFunc: FnOnce(
 			Option<u64>,
 			bool,
-		) -> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
+		)
+			-> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
 	>(
 		&self, prev_hop: HTLCPreviousHopData, payment_preimage: PaymentPreimage,
 		payment_info: Option<PaymentClaimDetails>, attribution_data: Option<AttributionData>,
@@ -9216,7 +9406,8 @@ where
 		ComplFunc: FnOnce(
 			Option<u64>,
 			bool,
-		) -> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
+		)
+			-> (Option<MonitorUpdateCompletionAction>, Option<RAAMonitorUpdateBlockingAction>),
 	>(
 		&self, prev_hop: HTLCClaimSource, payment_preimage: PaymentPreimage,
 		payment_info: Option<PaymentClaimDetails>, attribution_data: Option<AttributionData>,
@@ -9812,6 +10003,29 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 						Some(blocking_action),
 					);
 				},
+				MonitorUpdateCompletionAction::FinalizeRgbFunding {
+					temporary_channel_id, counterparty_node_id, funding_signed,
+				} => {
+					self.finalize_rgb_funding_after_monitor_persist(&temporary_channel_id);
+					let per_peer_state = self.per_peer_state.read().unwrap();
+					let peer_state = per_peer_state.get(&counterparty_node_id).unwrap_or_else(|| {
+						panic!("RGB funding peer state disappeared after monitor persistence")
+					});
+					self.enqueue_funding_signed(
+						&mut peer_state.lock().unwrap().pending_msg_events,
+						counterparty_node_id,
+						funding_signed,
+					);
+					self.needs_persist_flag.store(true, Ordering::Release);
+					self.event_persist_notifier.notify();
+				},
+				MonitorUpdateCompletionAction::FinalizeRgbFundingAwaitingSigner {
+					temporary_channel_id, ..
+				} => {
+					self.finalize_rgb_funding_after_monitor_persist(&temporary_channel_id);
+					self.needs_persist_flag.store(true, Ordering::Release);
+					self.event_persist_notifier.notify();
+				},
 			}
 		}
 
@@ -10233,7 +10447,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				let best_block_height = self.best_block.read().unwrap().height;
 				match unaccepted_channel.open_channel_msg {
 					OpenChannelMessage::V1(open_channel_msg) => {
-						InboundV1Channel::new(
+						InboundV1Channel::new_with_rgb(
 							&self.fee_estimator, &self.entropy_source, &self.signer_provider, *counterparty_node_id,
 							&self.channel_type_features(), &peer_state.latest_features, &open_channel_msg,
 							user_channel_id, &config, best_block_height, &self.logger, accept_0conf,
@@ -10529,7 +10743,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 
 		let (mut channel, message_send_event) = match msg {
 			OpenChannelMessageRef::V1(msg) => {
-				let mut channel = InboundV1Channel::new(
+				let mut channel = InboundV1Channel::new_with_rgb(
 					&self.fee_estimator, &self.entropy_source, &self.signer_provider, *counterparty_node_id,
 					&self.channel_type_features(), &peer_state.latest_features, msg, user_channel_id,
 					&self.config.read().unwrap(), best_block_height, &self.logger, /*is_0conf=*/false, false, self.ldk_data_dir.clone(),
@@ -10619,57 +10833,154 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	#[rustfmt::skip]
 	fn internal_funding_created(&self, counterparty_node_id: &PublicKey, msg: &msgs::FundingCreated) -> Result<(), MsgHandleErrInternal> {
 		let best_block = *self.best_block.read().unwrap();
-
-		let per_peer_state = self.per_peer_state.read().unwrap();
-		let peer_state_mutex = per_peer_state.get(counterparty_node_id)
-			.ok_or_else(|| {
-				debug_assert!(false);
-				MsgHandleErrInternal::send_err_msg_no_close(format!("Can't find a peer matching the passed counterparty node_id {counterparty_node_id}"), msg.temporary_channel_id)
-			})?;
-
-		let mut peer_state_lock = peer_state_mutex.lock().unwrap();
-		let peer_state = &mut *peer_state_lock;
-		let (mut chan, funding_msg_opt, monitor) =
+		let (inbound_chan, expected_connection_epoch) = {
+			let per_peer_state = self.per_peer_state.read().unwrap();
+			let peer_state_mutex = per_peer_state.get(counterparty_node_id)
+				.ok_or_else(|| {
+					debug_assert!(false);
+					MsgHandleErrInternal::send_err_msg_no_close(format!("Can't find a peer matching the passed counterparty node_id {counterparty_node_id}"), msg.temporary_channel_id)
+				})?;
+			let mut peer_state_lock = peer_state_mutex.lock().unwrap();
+			let peer_state = &mut *peer_state_lock;
 			match peer_state.channel_by_id.remove(&msg.temporary_channel_id)
 				.map(Channel::into_unfunded_inbound_v1)
 			{
-				Some(Ok(inbound_chan)) => {
-					let logger = WithChannelContext::from(&self.logger, &inbound_chan.context, None);
-					if let Some(consignment_endpoint) = &inbound_chan.funding.consignment_endpoint {
-						match handle_funding(&msg.temporary_channel_id, msg.funding_txid.to_string(), &self.ldk_data_dir, consignment_endpoint.clone(), inbound_chan.funding.push_asset_amount, self.rgb_kv_store.as_ref()) {
-							Ok(()) => (),
-							Err(e) => {
-								// at this point the channel initiator already transitioned its channel to the funded channel ID
-								let mut chan = Channel::from(inbound_chan);
-								let funding_txo = OutPoint { txid: msg.funding_txid, index: msg.funding_output_index };
-								chan.context_mut().channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
-								return Err(convert_channel_err!(self, peer_state, e, &mut chan).1);
-							},
-						}
-					}
-					match inbound_chan.funding_created(msg, best_block, &self.signer_provider, &&logger) {
-						Ok(res) => res,
-						Err((inbound_chan, err)) => {
-							// We've already removed this inbound channel from the map in `PeerState`
-							// above so at this point we just need to clean up any lingering entries
-							// concerning this channel as it is safe to do so.
-							debug_assert!(matches!(err, ChannelError::Close(_)));
-							let mut chan = Channel::from(inbound_chan);
-							return Err(convert_channel_err!(self, peer_state, err, &mut chan).1);
-						},
-					}
-				},
+				Some(Ok(inbound_chan)) => (inbound_chan, peer_state.connection_epoch),
 				Some(Err(mut chan)) => {
-					let err_msg = format!("Got an unexpected funding_created message from peer with counterparty_node_id {}", counterparty_node_id);
-					let err = ChannelError::close(err_msg);
+					let err = ChannelError::close(format!("Got an unexpected funding_created message from peer with counterparty_node_id {}", counterparty_node_id));
 					return Err(convert_channel_err!(self, peer_state, err, &mut chan).1);
 				},
-				None => return Err(MsgHandleErrInternal::send_err_msg_no_close(format!("Got a message for a channel from the wrong node! No such channel for the passed counterparty_node_id {}", counterparty_node_id), msg.temporary_channel_id))
+				None => return Err(MsgHandleErrInternal::send_err_msg_no_close(format!("Got a message for a channel from the wrong node! No such channel for the passed counterparty_node_id {}", counterparty_node_id), msg.temporary_channel_id)),
+			}
+		};
+
+		let funding_acceptance_result = inbound_chan.funding.consignment_endpoint.as_ref().map(|endpoint| {
+			prepare_funding(
+				&msg.temporary_channel_id,
+				msg.funding_txid.to_string(),
+				&self.ldk_data_dir,
+				msg.funding_output_index,
+				counterparty_node_id,
+				endpoint.clone(),
+				inbound_chan.funding.push_asset_amount,
+				self.rgb_kv_store.as_ref(),
+			)
+		});
+
+		let per_peer_state = self.per_peer_state.read().unwrap();
+		let peer_state_mutex = match per_peer_state.get(counterparty_node_id) {
+			Some(peer_state) => peer_state,
+			None => {
+				if let Some(Ok(acceptance)) = funding_acceptance_result {
+					abort_prepared_funding(acceptance, self.rgb_kv_store.as_ref()).map_err(|error| {
+						MsgHandleErrInternal::send_err_msg_no_close(
+							format!("Peer disappeared and prepared RGB funding could not be rolled back: {error:?}"),
+							msg.temporary_channel_id,
+						)
+					})?;
+				}
+				return Err(MsgHandleErrInternal::send_err_msg_no_close(
+					format!("Peer disconnected during RGB funding acceptance: {counterparty_node_id}"),
+					msg.temporary_channel_id,
+				));
+			},
+		};
+		let mut peer_state_lock = peer_state_mutex.lock().unwrap();
+		let peer_state = &mut *peer_state_lock;
+		let mut prepared_acceptance = match funding_acceptance_result {
+			Some(Ok(acceptance)) => Some(acceptance),
+			Some(Err(e)) => {
+				let mut chan = Channel::from(inbound_chan);
+				let funding_txo = OutPoint { txid: msg.funding_txid, index: msg.funding_output_index };
+				chan.context_mut().channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
+				return Err(convert_channel_err!(self, peer_state, e, &mut chan).1);
+			},
+			None => None,
+		};
+		#[cfg(any(test, feature = "_rln_test_hooks"))]
+		if prepared_acceptance.is_some() &&
+			ABORT_NEXT_RGB_FUNDING_AFTER_PREPARE.swap(false, Ordering::AcqRel)
+		{
+			if let Some(acceptance) = prepared_acceptance.take() {
+				abort_prepared_funding(acceptance, self.rgb_kv_store.as_ref()).map_err(|error| {
+					MsgHandleErrInternal::send_err_msg_no_close(
+						format!("Failed to abort prepared RGB funding test operation: {error:?}"),
+						msg.temporary_channel_id,
+					)
+				})?;
+			}
+			let mut channel = Channel::from(inbound_chan);
+			let funding_txo = OutPoint {
+				txid: msg.funding_txid,
+				index: msg.funding_output_index,
 			};
+			channel.context_mut().channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
+			let error = ChannelError::close("Injected retry after prepared RGB funding".to_owned());
+			return Err(convert_channel_err!(self, peer_state, error, &mut channel).1);
+		}
+		if prepared_acceptance.is_some() &&
+			(!peer_state.is_connected || peer_state.connection_epoch != expected_connection_epoch)
+		{
+			if let Some(acceptance) = prepared_acceptance.take() {
+				abort_prepared_funding(acceptance, self.rgb_kv_store.as_ref()).map_err(|error| {
+					MsgHandleErrInternal::send_err_msg_no_close(
+						format!("Failed to roll back disconnected RGB funding: {error:?}"),
+						msg.temporary_channel_id,
+					)
+				})?;
+			}
+			return Err(MsgHandleErrInternal::send_err_msg_no_close(
+				format!("Peer transport session changed during RGB funding acceptance: {counterparty_node_id}"),
+				msg.temporary_channel_id,
+			));
+		}
+		let promoted_acceptance_key = if let Some(acceptance) = prepared_acceptance.take() {
+			match promote_funding(acceptance, self.rgb_kv_store.as_ref()) {
+				Ok(key) => Some(key),
+				Err(error) => {
+					let mut channel = Channel::from(inbound_chan);
+					let funding_txo = OutPoint { txid: msg.funding_txid, index: msg.funding_output_index };
+					channel.context_mut().channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
+					return Err(convert_channel_err!(self, peer_state, error, &mut channel).1);
+				},
+			}
+		} else {
+			None
+		};
+		let logger = WithChannelContext::from(&self.logger, &inbound_chan.context, None);
+		let (mut chan, funding_msg_opt, monitor) = match inbound_chan.funding_created(msg, best_block, &self.signer_provider, &&logger) {
+			Ok(res) => res,
+			Err((inbound_chan, err)) => {
+				if let Some(temporary_channel_id) = promoted_acceptance_key.as_ref() {
+					rollback_funding(
+						temporary_channel_id,
+						&self.ldk_data_dir,
+						self.rgb_kv_store.as_ref(),
+					)
+					.map_err(|error| {
+						MsgHandleErrInternal::send_err_msg_no_close(
+							format!("Failed to roll back rejected RGB funding: {error:?}"),
+							msg.temporary_channel_id,
+						)
+					})?;
+				}
+				debug_assert!(matches!(err, ChannelError::Close(_)));
+				let mut chan = Channel::from(inbound_chan);
+				return Err(convert_channel_err!(self, peer_state, err, &mut chan).1);
+			},
+		};
 
 		let funded_channel_id = chan.context.channel_id();
 
 		macro_rules! fail_chan { ($err: expr) => { {
+			if let Some(temporary_channel_id) = promoted_acceptance_key.as_ref() {
+				rollback_funding(
+					temporary_channel_id,
+					&self.ldk_data_dir,
+					self.rgb_kv_store.as_ref(),
+				)
+				.unwrap_or_else(|error| panic!("Failed to roll back invalid RGB funding: {error:?}"));
+			}
 			// Note that at this point we've filled in the funding outpoint on our
 			// channel, but its actually in conflict with another channel. Thus, if
 			// we call `convert_channel_err` immediately (thus calling
@@ -10681,46 +10992,38 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			return Err(convert_channel_err!(self, peer_state, err, &mut chan, UNFUNDED_CHANNEL).1);
 		} } }
 
+		if peer_state.channel_by_id.contains_key(&funded_channel_id) {
+			fail_chan!("Already had channel with the new channel_id");
+		}
+
 		match peer_state.channel_by_id.entry(funded_channel_id) {
-			hash_map::Entry::Occupied(_) => {
-				fail_chan!("Already had channel with the new channel_id");
-			},
+			hash_map::Entry::Occupied(_) => unreachable!("channel ID was checked before RGB promotion"),
 			hash_map::Entry::Vacant(e) => {
 				let monitor_res = self.chain_monitor.watch_channel(monitor.channel_id(), monitor);
 				if let Ok(persist_state) = monitor_res {
-					// There's no problem signing a counterparty's funding transaction if our monitor
-					// hasn't persisted to disk yet - we can't lose money on a transaction that we haven't
-					// accepted payment from yet. We do, however, need to wait to send our channel_ready
-					// until we have persisted our monitor.
-					if let Some(msg) = funding_msg_opt {
-						#[cfg(any(test, feature = "_rln_test_hooks"))]
-						let drop_funding_signed = DROP_FUNDING_SIGNED_ON_NODE
-							.lock()
-							.unwrap()
-							.as_ref()
-							.map_or(false, |id| *id == self.get_our_node_id());
-						#[cfg(not(any(test, feature = "_rln_test_hooks")))]
-						let drop_funding_signed = false;
-						if drop_funding_signed {
-							log_error!(
-								WithChannelContext::from(&self.logger, &chan.context, None),
-								"TEST: dropping funding_signed for channel {funded_channel_id}, sending error instead"
-							);
-							peer_state.pending_msg_events.push(MessageSendEvent::HandleError {
-								node_id: *counterparty_node_id,
-								action: msgs::ErrorAction::SendErrorMessage {
-									msg: msgs::ErrorMessage {
-										channel_id: msg.channel_id,
-										data: "TEST: funding_signed dropped".to_owned(),
-									},
-								},
-							});
-						} else {
-							peer_state.pending_msg_events.push(MessageSendEvent::SendFundingSigned {
-								node_id: *counterparty_node_id,
-								msg,
-							});
-						}
+						if let Some(temporary_channel_id) = promoted_acceptance_key.as_ref() {
+							let action = if let Some(funding_signed) = funding_msg_opt.clone() {
+								MonitorUpdateCompletionAction::FinalizeRgbFunding {
+									temporary_channel_id: temporary_channel_id.clone(),
+									counterparty_node_id: *counterparty_node_id,
+									funding_signed,
+								}
+							} else {
+								MonitorUpdateCompletionAction::FinalizeRgbFundingAwaitingSigner {
+									temporary_channel_id: temporary_channel_id.clone(),
+									counterparty_node_id: *counterparty_node_id,
+								}
+							};
+							peer_state.monitor_update_blocked_actions
+								.entry(funded_channel_id)
+								.or_insert_with(Vec::new)
+								.push(action);
+					} else if let Some(msg) = funding_msg_opt {
+						self.enqueue_funding_signed(
+							&mut peer_state.pending_msg_events,
+							*counterparty_node_id,
+							msg,
+						);
 					}
 
 					if let Some(funded_chan) = e.insert(Channel::from(chan)).as_funded_mut() {
@@ -14300,6 +14603,7 @@ where
 							monitor_update_blocked_actions: BTreeMap::new(),
 							actions_blocking_raa_monitor_updates: BTreeMap::new(),
 							closed_channel_monitor_update_ids: BTreeMap::new(),
+							connection_epoch: self.next_peer_connection_epoch(),
 							is_connected: true,
 							peer_storage: Vec::new(),
 						}));
@@ -14321,6 +14625,7 @@ where
 						peer_state.pending_msg_events.clear();
 
 						debug_assert!(!peer_state.is_connected, "A peer shouldn't be connected twice");
+						peer_state.connection_epoch = self.next_peer_connection_epoch();
 						peer_state.is_connected = true;
 					},
 				}
@@ -17154,6 +17459,7 @@ where
 			monitor_update_blocked_actions: BTreeMap::new(),
 			actions_blocking_raa_monitor_updates: BTreeMap::new(),
 			closed_channel_monitor_update_ids: BTreeMap::new(),
+			connection_epoch: 0,
 			peer_storage: Vec::new(),
 			is_connected: false,
 		};
@@ -17606,7 +17912,7 @@ where
 			}
 			pending_outbound_payments = Some(outbounds);
 		}
-		let pending_outbounds = OutboundPayments::new(
+		let pending_outbounds = OutboundPayments::new_with_rgb_store(
 			pending_outbound_payments.unwrap(),
 			Arc::clone(&args.rgb_kv_store),
 		);
@@ -18469,6 +18775,35 @@ where
 				}
 			}
 		}
+		let mut resumable_rgb_funding = Vec::new();
+		for peer_state in per_peer_state.values() {
+			for actions in peer_state.lock().unwrap().monitor_update_blocked_actions.values() {
+				for action in actions {
+					match action {
+						MonitorUpdateCompletionAction::FinalizeRgbFunding {
+							temporary_channel_id,
+							..
+						}
+						| MonitorUpdateCompletionAction::FinalizeRgbFundingAwaitingSigner {
+							temporary_channel_id,
+							..
+						} => {
+							resumable_rgb_funding.push(temporary_channel_id.clone());
+						},
+						_ => {},
+					}
+				}
+			}
+		}
+		reconcile_pending_funding_acceptances(
+			&resumable_rgb_funding,
+			&args.ldk_data_dir,
+			args.rgb_kv_store.as_ref(),
+		)
+		.map_err(|error| {
+			log_error!(args.logger, "Failed to reconcile interrupted RGB funding: {:?}", error);
+			DecodeError::InvalidValue
+		})?;
 
 		let best_block = BestBlock::new(best_block_hash, best_block_height);
 		let flow = OffersMessageFlow::new(
@@ -18482,7 +18817,6 @@ where
 			args.logger.clone(),
 		)
 		.with_async_payments_offers_cache(async_receive_offer_cache);
-
 		let channel_manager = ChannelManager {
 			chain_hash,
 			fee_estimator: bounded_fee_estimator,
@@ -18514,6 +18848,7 @@ where
 			highest_seen_timestamp: AtomicUsize::new(highest_seen_timestamp as usize),
 
 			per_peer_state: FairRwLock::new(per_peer_state),
+			peer_connection_epoch_counter: AtomicU64::new(1),
 
 			#[cfg(not(any(test, feature = "_externalize_tests")))]
 			monitor_update_type: AtomicUsize::new(0),
@@ -18832,13 +19167,12 @@ where
 	}
 }
 
-/*
 #[cfg(test)]
 mod tests {
 	use crate::events::{ClosureReason, Event, HTLCHandlingFailureType};
 	use crate::ln::channelmanager::{
-		create_recv_pending_htlc_info, inbound_payment, HTLCForwardInfo, InterceptId, PaymentId,
-		RecipientOnionFields,
+		create_recv_pending_htlc_info, inbound_payment, HTLCForwardInfo, InterceptId,
+		NextHopForward, PaymentId, RecipientOnionFields,
 	};
 	use crate::ln::functional_test_utils::*;
 	use crate::ln::msgs::{self, BaseMessageHandler, ChannelMessageHandler, MessageSendEvent};
@@ -18848,15 +19182,45 @@ mod tests {
 	use crate::ln::types::ChannelId;
 	use crate::prelude::*;
 	use crate::routing::router::{find_route, PaymentParameters, RouteParameters};
-	use crate::sign::EntropySource;
+	use crate::sign::{EntropySource, NodeSigner};
 	use crate::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 	use crate::util::config::{ChannelConfig, ChannelConfigUpdate};
 	use crate::util::errors::APIError;
-	use crate::util::ser::Writeable;
+	use crate::util::ser::{MaybeReadable, Writeable};
 	use crate::util::test_utils;
 	use bitcoin::secp256k1::ecdh::SharedSecret;
 	use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 	use core::sync::atomic::Ordering;
+
+	#[test]
+	fn rgb_funding_awaiting_signer_action_roundtrips() {
+		let counterparty_node_id = PublicKey::from_secret_key(
+			&Secp256k1::new(),
+			&SecretKey::from_slice(&[42; 32]).unwrap(),
+		);
+		let action = super::MonitorUpdateCompletionAction::FinalizeRgbFundingAwaitingSigner {
+			temporary_channel_id: "temporary-rgb-channel".to_owned(),
+			counterparty_node_id,
+		};
+		let mut encoded = Vec::new();
+		action.write(&mut encoded).unwrap();
+		assert_eq!(encoded[0], 6, "the safety-critical action must use a required enum id");
+
+		let decoded =
+			<super::MonitorUpdateCompletionAction as MaybeReadable>::read(&mut &encoded[..])
+				.unwrap()
+				.unwrap();
+		match decoded {
+			super::MonitorUpdateCompletionAction::FinalizeRgbFundingAwaitingSigner {
+				temporary_channel_id,
+				counterparty_node_id: decoded_counterparty,
+			} => {
+				assert_eq!(temporary_channel_id, "temporary-rgb-channel");
+				assert_eq!(decoded_counterparty, counterparty_node_id);
+			},
+			other => panic!("unexpected completion action: {other:?}"),
+		}
+	}
 
 	#[test]
 	#[rustfmt::skip]
@@ -19084,7 +19448,7 @@ mod tests {
 		let (payment_preimage, payment_hash, ..) = route_payment(&nodes[0], &expected_route, 100_000);
 
 		// Next, attempt a keysend payment and make sure it fails.
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			PaymentParameters::for_keysend(expected_route.last().unwrap().node.get_our_node_id(),
 			TEST_FINAL_CLTV, false), 100_000);
 		nodes[0].node.send_spontaneous_payment(
@@ -19180,7 +19544,7 @@ mod tests {
 		pass_along_path(&nodes[0], &path, 100_000, payment_hash, None, event, true, Some(payment_preimage));
 
 		// Next, attempt a keysend payment and make sure it fails.
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			PaymentParameters::for_keysend(expected_route.last().unwrap().node.get_our_node_id(), TEST_FINAL_CLTV, false),
 			100_000
 		);
@@ -19230,7 +19594,7 @@ mod tests {
 		let payee_pubkey = nodes[1].node.get_our_node_id();
 
 		let _chan = create_chan_between_nodes(&nodes[0], &nodes[1]);
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			PaymentParameters::for_keysend(payee_pubkey, 40, false), 10_000);
 		let network_graph = nodes[0].network_graph;
 		let first_hops = nodes[0].node.list_usable_channels();
@@ -19519,7 +19883,9 @@ mod tests {
 
 		check_unkown_peer_error(nodes[0].node.force_close_broadcasting_latest_txn(&channel_id, &unkown_public_key, error_message.to_string()), unkown_public_key);
 
-		check_unkown_peer_error(nodes[0].node.forward_intercepted_htlc(intercept_id, &channel_id, unkown_public_key, 1_000_000), unkown_public_key);
+		check_unkown_peer_error(nodes[0].node.forward_intercepted_htlc(intercept_id,
+			NextHopForward::ChannelId(unkown_public_key, &channel_id), unkown_public_key,
+			1_000_000, None), unkown_public_key);
 
 		check_unkown_peer_error(nodes[0].node.update_channel_config(&unkown_public_key, &[channel_id], &ChannelConfig::default()), unkown_public_key);
 	}
@@ -19549,7 +19915,9 @@ mod tests {
 
 		check_channel_unavailable_error(nodes[0].node.force_close_broadcasting_latest_txn(&channel_id, &counterparty_node_id, error_message.to_string()), channel_id, counterparty_node_id);
 
-		check_channel_unavailable_error(nodes[0].node.forward_intercepted_htlc(InterceptId([0; 32]), &channel_id, counterparty_node_id, 1_000_000), channel_id, counterparty_node_id);
+		check_channel_unavailable_error(nodes[0].node.forward_intercepted_htlc(
+			InterceptId([0; 32]), NextHopForward::ChannelId(counterparty_node_id, &channel_id),
+			counterparty_node_id, 1_000_000, None), channel_id, counterparty_node_id);
 
 		check_channel_unavailable_error(nodes[0].node.update_channel_config(&counterparty_node_id, &[channel_id], &ChannelConfig::default()), channel_id, counterparty_node_id);
 	}
@@ -19681,6 +20049,7 @@ mod tests {
 		let extra_fee_msat = 10;
 		let hop_data = onion_utils::Hop::Receive {
 			hop_data: msgs::InboundOnionReceivePayload {
+				rgb_payment_to_forward: None,
 				sender_intended_htlc_amt_msat: 100,
 				cltv_expiry_height: 42,
 				payment_metadata: None,
@@ -19699,14 +20068,15 @@ mod tests {
 		if let Err(crate::ln::channelmanager::InboundHTLCErr { reason, .. }) =
 			create_recv_pending_htlc_info(hop_data, [0; 32], PaymentHash([0; 32]),
 				sender_intended_amt_msat - extra_fee_msat - 1, 42, None, true, Some(extra_fee_msat),
-				current_height)
+				current_height, None)
 		{
 			assert_eq!(reason, LocalHTLCFailureReason::FinalIncorrectHTLCAmount);
 		} else { panic!(); }
 
 		// If amt_received + extra_fee is equal to the sender intended amount, we're fine.
 		let hop_data = onion_utils::Hop::Receive {
-			hop_data: msgs::InboundOnionReceivePayload { // This is the same payload as above, InboundOnionPayload doesn't implement Clone
+			hop_data: msgs::InboundOnionReceivePayload {
+				rgb_payment_to_forward: None, // This is the same payload as above, InboundOnionPayload doesn't implement Clone
 				sender_intended_htlc_amt_msat: 100,
 				cltv_expiry_height: 42,
 				payment_metadata: None,
@@ -19722,7 +20092,7 @@ mod tests {
 		let current_height: u32 = node[0].node.best_block.read().unwrap().height;
 		assert!(create_recv_pending_htlc_info(hop_data, [0; 32], PaymentHash([0; 32]),
 			sender_intended_amt_msat - extra_fee_msat, 42, None, true, Some(extra_fee_msat),
-			current_height).is_ok());
+			current_height, None).is_ok());
 	}
 
 	#[test]
@@ -19736,6 +20106,7 @@ mod tests {
 		let current_height: u32 = node[0].node.best_block.read().unwrap().height;
 		let result = create_recv_pending_htlc_info(onion_utils::Hop::Receive {
 			hop_data: msgs::InboundOnionReceivePayload {
+				rgb_payment_to_forward: None,
 				sender_intended_htlc_amt_msat: 100,
 				cltv_expiry_height: TEST_FINAL_CLTV,
 				payment_metadata: None,
@@ -19747,7 +20118,7 @@ mod tests {
 				custom_tlvs: Vec::new(),
 			},
 			shared_secret: SharedSecret::from_bytes([0; 32]),
-		}, [0; 32], PaymentHash([0; 32]), 100, TEST_FINAL_CLTV + 1, None, true, None, current_height);
+		}, [0; 32], PaymentHash([0; 32]), 100, TEST_FINAL_CLTV + 1, None, true, None, current_height, None);
 
 		// Should not return an error as this condition:
 		// https://github.com/lightning/bolts/blob/4dcc377209509b13cf89a4b91fde7d478f5b46d8/04-onion-routing.md?plain=1#L334
@@ -20171,7 +20542,7 @@ pub mod bench {
 
 				$node_a.send_payment(payment_hash, RecipientOnionFields::secret_only(payment_secret),
 					PaymentId(payment_hash.0),
-					RouteParameters::from_payment_params_and_value(payment_params, 10_000),
+					RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 10_000),
 					Retry::Attempts(0)).unwrap();
 				let payment_event = SendEvent::from_event($node_a.get_and_clear_pending_msg_events().pop().unwrap());
 				$node_b.handle_update_add_htlc($node_a.get_our_node_id(), &payment_event.msgs[0]);
@@ -20211,4 +20582,3 @@ pub mod bench {
 		}));
 	}
 }
-*/

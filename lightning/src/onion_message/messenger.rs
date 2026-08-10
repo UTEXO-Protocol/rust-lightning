@@ -191,14 +191,28 @@ where
 /// # use lightning::ln::peer_handler::IgnoringMessageHandler;
 /// # use lightning::onion_message::messenger::{Destination, MessageRouter, MessageSendInstructions, OnionMessagePath, OnionMessenger};
 /// # use lightning::onion_message::packet::OnionMessageContents;
-/// # use lightning::sign::{NodeSigner, ReceiveAuthKey};
+/// # use lightning::sign::NodeSigner;
 /// # use lightning::util::logger::{Logger, Record};
+/// # use lightning::util::persist::KVStoreSync;
 /// # use lightning::util::ser::{Writeable, Writer};
 /// # use lightning::io;
 /// # use std::sync::Arc;
 /// # struct FakeLogger;
 /// # impl Logger for FakeLogger {
 /// #     fn log(&self, record: Record) { println!("{:?}" , record); }
+/// # }
+/// # struct NoopStore;
+/// # impl KVStoreSync for NoopStore {
+/// #     fn read(&self, _: &str, _: &str, _: &str) -> Result<Vec<u8>, io::Error> {
+/// #         Err(io::ErrorKind::NotFound.into())
+/// #     }
+/// #     fn write(&self, _: &str, _: &str, _: &str, _: Vec<u8>) -> Result<(), io::Error> {
+/// #         Ok(())
+/// #     }
+/// #     fn remove(&self, _: &str, _: &str, _: &str, _: bool) -> Result<(), io::Error> {
+/// #         Ok(())
+/// #     }
+/// #     fn list(&self, _: &str, _: &str) -> Result<Vec<String>, io::Error> { Ok(vec![]) }
 /// # }
 /// # struct FakeMessageRouter {}
 /// # impl MessageRouter for FakeMessageRouter {
@@ -213,17 +227,22 @@ where
 /// #             first_node_addresses: Vec::new(),
 /// #         })
 /// #     }
-/// #     fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification>(
-/// #         &self, _recipient: PublicKey, _local_node_receive_key: ReceiveAuthKey,
-/// #         _context: MessageContext, _peers: Vec<MessageForwardNode>, _secp_ctx: &Secp256k1<T>
-/// #     ) -> Result<Vec<BlindedMessagePath>, ()> {
+/// #     fn create_blinded_paths<
+/// #         T: secp256k1::Signing + secp256k1::Verification, NS: core::ops::Deref,
+/// #     >(
+/// #         &self, _recipient: PublicKey, _node_signer: &NS, _context: MessageContext,
+/// #         _peers: Vec<MessageForwardNode>, _secp_ctx: &Secp256k1<T>
+/// #     ) -> Result<Vec<BlindedMessagePath>, ()>
+/// #     where
+/// #         NS::Target: NodeSigner,
+/// #     {
 /// #         unreachable!()
 /// #     }
 /// # }
 /// # let seed = [42u8; 32];
 /// # let time = Duration::from_secs(123456);
-/// # let kv_store: Arc<dyn lightning::util::persist::KVStoreSync + Send + Sync> = Arc::new(lightning::util::test_utils::TestStore::new(false));
-/// # let keys_manager = KeysManager::new(&seed, time.as_secs(), time.subsec_nanos(), true, std::path::PathBuf::from("/tmp/ldk_test"), kv_store);
+/// # let kv_store: Arc<dyn KVStoreSync + Send + Sync> = Arc::new(NoopStore);
+/// # let keys_manager = Arc::new(KeysManager::new(&seed, time.as_secs(), time.subsec_nanos(), true, std::path::PathBuf::from("/tmp/ldk_test"), kv_store));
 /// # let logger = Arc::new(FakeLogger {});
 /// # let node_secret = SecretKey::from_slice(&<Vec<u8>>::from_hex("0101010101010101010101010101010101010101010101010101010101010101").unwrap()[..]).unwrap();
 /// # let secp_ctx = Secp256k1::new();
@@ -239,7 +258,7 @@ where
 /// // Create the onion messenger. This must use the same `keys_manager` as is passed to your
 /// // ChannelManager.
 /// let onion_messenger = OnionMessenger::new(
-///     &keys_manager, &keys_manager, logger, &node_id_lookup, message_router,
+///     keys_manager.clone(), keys_manager.clone(), logger, &node_id_lookup, message_router,
 ///     &offers_message_handler, &async_payments_message_handler, &dns_resolution_message_handler,
 ///     &custom_message_handler,
 /// );
@@ -272,8 +291,9 @@ where
 /// 	MessageForwardNode { node_id: hop_node_id4, short_channel_id: None },
 /// ];
 /// let context = MessageContext::Custom(Vec::new());
-/// let receive_key = keys_manager.get_receive_auth_key();
-/// let blinded_path = BlindedMessagePath::new(&hops, your_node_id, receive_key, context, &keys_manager, &secp_ctx);
+/// let blinded_path = BlindedMessagePath::new(
+///     &hops, your_node_id, &keys_manager, context, keys_manager.clone(), &secp_ctx,
+/// );
 ///
 /// // Send a custom onion message to a blinded path.
 /// let destination = Destination::BlindedPath(blinded_path);

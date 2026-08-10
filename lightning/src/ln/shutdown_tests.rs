@@ -414,7 +414,8 @@ fn updates_shutdown_wait() {
 	let payment_params_1 = PaymentParameters::from_node_id(node_b_id, TEST_FINAL_CLTV)
 		.with_bolt11_features(nodes[1].node.bolt11_invoice_features())
 		.unwrap();
-	let route_params = RouteParameters::from_payment_params_and_value(payment_params_1, 100_000);
+	let route_params =
+		RouteParameters::from_payment_params_and_value_without_rgb(payment_params_1, 100_000);
 	let route_1 = get_route(
 		&node_a_id,
 		&route_params,
@@ -429,7 +430,8 @@ fn updates_shutdown_wait() {
 	let payment_params_2 = PaymentParameters::from_node_id(node_a_id, TEST_FINAL_CLTV)
 		.with_bolt11_features(nodes[0].node.bolt11_invoice_features())
 		.unwrap();
-	let route_params = RouteParameters::from_payment_params_and_value(payment_params_2, 100_000);
+	let route_params =
+		RouteParameters::from_payment_params_and_value_without_rgb(payment_params_2, 100_000);
 	let route_2 = get_route(
 		&node_b_id,
 		&route_params,
@@ -538,7 +540,7 @@ fn do_htlc_fail_async_shutdown(blinded_recipient: bool) {
 			&chanmon_cfgs[2].keys_manager,
 		)
 	} else {
-		RouteParameters::from_payment_params_and_value(
+		RouteParameters::from_payment_params_and_value_without_rgb(
 			PaymentParameters::from_node_id(node_c_id, TEST_FINAL_CLTV),
 			amt_msat,
 		)

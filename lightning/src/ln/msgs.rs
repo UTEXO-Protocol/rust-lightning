@@ -3745,7 +3745,8 @@ where
 						}),
 				} => {
 					if amt.is_some()
-						|| cltv_value.is_some() || total_msat.is_some()
+						|| cltv_value.is_some()
+						|| total_msat.is_some()
 						|| keysend_preimage.is_some()
 						|| invoice_request.is_some()
 					{
@@ -3899,7 +3900,8 @@ where
 						}),
 				} => {
 					if amt.is_some()
-						|| cltv_value.is_some() || total_msat.is_some()
+						|| cltv_value.is_some()
+						|| total_msat.is_some()
 						|| keysend_preimage.is_some()
 						|| invoice_request.is_some()
 					{
@@ -4053,15 +4055,29 @@ impl Writeable for UnsignedChannelAnnouncement {
 
 impl LengthReadable for UnsignedChannelAnnouncement {
 	fn read_from_fixed_length_buffer<R: LengthLimitedRead>(r: &mut R) -> Result<Self, DecodeError> {
+		let features = Readable::read(r)?;
+		let chain_hash = Readable::read(r)?;
+		let short_channel_id = Readable::read(r)?;
+		let node_id_1 = Readable::read(r)?;
+		let node_id_2 = Readable::read(r)?;
+		let bitcoin_key_1 = Readable::read(r)?;
+		let bitcoin_key_2 = Readable::read(r)?;
+
+		// The deployed UTEXO RGB wire format appends a fixed optional contract ID to the
+		// standard announcement. A standard announcement with no excess data ends here,
+		// which is the only case that can be distinguished without negotiated features.
+		// For non-empty tails we retain the deployed RGB format instead of guessing whether
+		// arbitrary standard excess bytes represent an RGB extension.
+		let contract_id = if r.remaining_bytes() == 0 { None } else { Readable::read(r)? };
 		Ok(Self {
-			features: Readable::read(r)?,
-			chain_hash: Readable::read(r)?,
-			short_channel_id: Readable::read(r)?,
-			node_id_1: Readable::read(r)?,
-			node_id_2: Readable::read(r)?,
-			bitcoin_key_1: Readable::read(r)?,
-			bitcoin_key_2: Readable::read(r)?,
-			contract_id: Readable::read(r)?,
+			features,
+			chain_hash,
+			short_channel_id,
+			node_id_1,
+			node_id_2,
+			bitcoin_key_1,
+			bitcoin_key_2,
+			contract_id,
 			excess_data: read_to_end(r)?,
 		})
 	}
@@ -4447,7 +4463,6 @@ impl_writeable_msg!(GossipTimestampFilter, {
 	timestamp_range,
 }, {});
 
-/*
 #[cfg(test)]
 mod tests {
 	use crate::ln::msgs::SocketAddress;
@@ -4728,6 +4743,7 @@ mod tests {
 			features = ChannelFeatures::from_le_bytes(vec![0xFF, 0xFF]);
 		}
 		let unsigned_channel_announcement = msgs::UnsignedChannelAnnouncement {
+			contract_id: None,
 			features,
 			chain_hash: ChainHash::using_genesis_block(Network::Bitcoin),
 			short_channel_id: 2316138423780173,
@@ -4762,6 +4778,8 @@ mod tests {
 			.unwrap(),
 		);
 		target_value.append(&mut <Vec<u8>>::from_hex("00083a840000034d031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d076602531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe33703462779ad4aad39514614751a71085f2f10e1c7a593e4e030efb5b8721ce55b0b").unwrap());
+		// Legacy UTEXO RGB extension: absent contract ID.
+		target_value.push(0);
 		if excess_data {
 			target_value.append(&mut <Vec<u8>>::from_hex("0a00001400001e000028").unwrap());
 		}
@@ -4925,6 +4943,7 @@ mod tests {
 		let sig_1 =
 			get_sig_on!(privkey_1, secp_ctx, String::from("01010101010101010101010101010101"));
 		let unsigned_channel_update = msgs::UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Bitcoin),
 			short_channel_id: 2316138423780173,
 			timestamp: 20190119,
@@ -4961,6 +4980,8 @@ mod tests {
 		target_value
 			.append(&mut <Vec<u8>>::from_hex("009000000000000f42400000271000000014").unwrap());
 		target_value.append(&mut <Vec<u8>>::from_hex("0000777788889999").unwrap());
+		// Legacy UTEXO RGB extension: zero maximum RGB HTLC amount.
+		target_value.extend_from_slice(&0u64.to_be_bytes());
 		if excess_data {
 			target_value.append(&mut <Vec<u8>>::from_hex("000000003b9aca00").unwrap());
 		}
@@ -5006,7 +5027,9 @@ mod tests {
 			secp_ctx
 		);
 		let open_channel = msgs::OpenChannel {
+			push_asset_amount: None,
 			common_fields: CommonOpenChannelFields {
+				consignment_endpoint: None,
 				chain_hash: ChainHash::using_genesis_block(Network::Bitcoin),
 				temporary_channel_id: ChannelId::from_bytes([2; 32]),
 				funding_satoshis: 1311768467284833366,
@@ -5115,6 +5138,7 @@ mod tests {
 		);
 		let open_channelv2 = msgs::OpenChannelV2 {
 			common_fields: CommonOpenChannelFields {
+				consignment_endpoint: None,
 				chain_hash: ChainHash::using_genesis_block(Network::Bitcoin),
 				temporary_channel_id: ChannelId::from_bytes([2; 32]),
 				commitment_feerate_sat_per_1000_weight: 821716,
@@ -5955,6 +5979,7 @@ mod tests {
 			hmac: [2; 32],
 		};
 		let update_add_htlc = msgs::UpdateAddHTLC {
+			rgb_payment: None,
 			channel_id: ChannelId::from_bytes([2; 32]),
 			htlc_id: 2316138423780173,
 			amount_msat: 3608586615801332854,
@@ -5967,7 +5992,8 @@ mod tests {
 		};
 		let encoded_value = update_add_htlc.encode();
 		let target_value = <Vec<u8>>::from_hex("020202020202020202020202020202020202020202020202020202020202020200083a840000034d32144668701144760101010101010101010101010101010101010101010101010101010101010101000c89d4ff031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010202020202020202020202020202020202020202020202020202020202020202").unwrap();
-		assert_eq!(encoded_value, target_value);
+		// Legacy UTEXO RGB extension: absent RGB payment.
+		assert_eq!(encoded_value, [target_value, vec![0]].concat());
 	}
 
 	#[test]
@@ -6213,6 +6239,7 @@ mod tests {
 	#[test]
 	fn encoding_nonfinal_onion_hop_data() {
 		let outbound_msg = msgs::OutboundOnionPayload::Forward {
+			rgb_payment_to_forward: None,
 			short_channel_id: 0xdeadbeef1bad1dea,
 			amt_to_forward: 0x0badf00d01020304,
 			outgoing_cltv_value: 0xffffffff,
@@ -6229,6 +6256,7 @@ mod tests {
 			short_channel_id,
 			amt_to_forward,
 			outgoing_cltv_value,
+			..
 		}) = inbound_msg
 		{
 			assert_eq!(short_channel_id, 0xdeadbeef1bad1dea);
@@ -6242,6 +6270,7 @@ mod tests {
 	#[test]
 	fn encoding_final_onion_hop_data() {
 		let outbound_msg = msgs::OutboundOnionPayload::Receive {
+			rgb_payment_to_forward: None,
 			payment_data: None,
 			payment_metadata: None,
 			keysend_preimage: None,
@@ -6274,6 +6303,7 @@ mod tests {
 	fn encoding_final_onion_hop_data_with_secret() {
 		let expected_payment_secret = PaymentSecret([0x42u8; 32]);
 		let outbound_msg = msgs::OutboundOnionPayload::Receive {
+			rgb_payment_to_forward: None,
 			payment_data: Some(FinalOnionHopData {
 				payment_secret: expected_payment_secret,
 				total_msat: 0x1badca1f,
@@ -6298,6 +6328,7 @@ mod tests {
 			payment_metadata: None,
 			keysend_preimage: None,
 			custom_tlvs,
+			..
 		}) = inbound_msg
 		{
 			assert_eq!(payment_secret, expected_payment_secret);
@@ -6315,6 +6346,7 @@ mod tests {
 		// they're unknown
 		let bad_type_range_tlvs = vec![((1 << 16) - 4, vec![42]), ((1 << 16) - 2, vec![42; 32])];
 		let mut msg = msgs::OutboundOnionPayload::Receive {
+			rgb_payment_to_forward: None,
 			payment_data: None,
 			payment_metadata: None,
 			keysend_preimage: None,
@@ -6349,6 +6381,7 @@ mod tests {
 		let expected_custom_tlvs =
 			vec![(5482373483, vec![0x12, 0x34]), (5482373487, vec![0x42u8; 8])];
 		let msg = msgs::OutboundOnionPayload::Receive {
+			rgb_payment_to_forward: None,
 			payment_data: None,
 			payment_metadata: None,
 			keysend_preimage: None,
@@ -6707,6 +6740,7 @@ mod tests {
 	fn encode_big_payload() -> Result<Vec<u8>, io::Error> {
 		use crate::util::ser::HighZeroBytesDroppedBigSize;
 		let payload = msgs::OutboundOnionPayload::Forward {
+			rgb_payment_to_forward: None,
 			short_channel_id: 0xdeadbeef1bad1dea,
 			amt_to_forward: 1000,
 			outgoing_cltv_value: 0xffffffff,
@@ -6717,6 +6751,7 @@ mod tests {
 			short_channel_id,
 			amt_to_forward,
 			outgoing_cltv_value,
+			..
 		} = payload
 		{
 			_encode_varint_length_prefixed_tlv!(&mut encoded_payload, {
@@ -6852,4 +6887,3 @@ mod tests {
 		.is_err());
 	}
 }
-*/

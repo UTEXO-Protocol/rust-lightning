@@ -213,7 +213,10 @@ impl<'a, W: Writer> Writer for ChaChaPolyWriter<'a, W> {
 
 #[cfg(test)]
 mod tests {
-	use super::{ChaChaPolyReadAdapter, ChaChaPolyWriteAdapter};
+	use super::{
+		chachapoly_decrypt_with_optional_aad, chachapoly_encrypt_with_swapped_aad,
+		ChaChaPolyReadAdapter, ChaChaPolyWriteAdapter,
+	};
 	use crate::ln::msgs::DecodeError;
 	use crate::util::ser::{self, FixedLengthReader, LengthReadableArgs, Writeable};
 
@@ -260,6 +263,19 @@ mod tests {
 		let small_writeable =
 			TestWriteable { field1: vec![43], field2: vec![44], field3: vec![45] };
 		check_object_read_write!(small_writeable);
+	}
+
+	#[test]
+	fn authenticated_payload_round_trip() {
+		let key = [42; 32];
+		let aad = [43; 32];
+		let plaintext = b"authenticated blinded message payload".to_vec();
+		let ciphertext = chachapoly_encrypt_with_swapped_aad(plaintext.clone(), key, aad);
+		let (decrypted, authenticated) =
+			chachapoly_decrypt_with_optional_aad(&ciphertext, key, aad).unwrap();
+		assert_eq!(decrypted, plaintext);
+		assert!(authenticated);
+		assert!(chachapoly_decrypt_with_optional_aad(&ciphertext, key, [44; 32]).is_err());
 	}
 
 	fn do_chacha_stream_adapters_ser_macros() -> Result<(), DecodeError> {

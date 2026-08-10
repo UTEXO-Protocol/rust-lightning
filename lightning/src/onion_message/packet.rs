@@ -287,7 +287,7 @@ where
 		let mut message = None;
 		decode_tlv_stream_with_custom_tlv_decode!(&mut rd, {
 			(2, reply_path, option),
-			(4, encrypted_control_tlvs, option),
+			(4, encrypted_control_tlvs, optional_vec),
 		}, |msg_type, msg_reader| {
 			if msg_type < 64 { return Ok(false) }
 			// Don't allow reading more than one data TLV from an onion message.

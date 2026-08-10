@@ -7,7 +7,7 @@ use core::ops::Deref;
 use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
 
 use crate::ln::chan_utils::{
-	commit_tx_fee_sat, htlc_success_tx_weight, htlc_timeout_tx_weight, htlc_tx_fees_sat,
+	commit_tx_fee_sat_with_rgb, htlc_success_tx_weight, htlc_timeout_tx_weight, htlc_tx_fees_sat,
 	second_stage_tx_fees_sat, ChannelTransactionParameters, CommitmentTransaction,
 	HTLCOutputInCommitment,
 };
@@ -69,6 +69,7 @@ impl NextCommitmentStats {
 fn commit_plus_htlc_tx_fees_msat(
 	local: bool, next_commitment_htlcs: &[HTLCAmountDirection], dust_buffer_feerate: u32,
 	feerate: u32, broadcaster_dust_limit_satoshis: u64, channel_type: &ChannelTypeFeatures,
+	is_colored: bool,
 ) -> (u64, u64) {
 	let accepted_nondust_htlcs = next_commitment_htlcs
 		.iter()
@@ -95,16 +96,21 @@ fn commit_plus_htlc_tx_fees_msat(
 		})
 		.count();
 
-	let commitment_fee_sat =
-		commit_tx_fee_sat(feerate, accepted_nondust_htlcs + offered_nondust_htlcs, channel_type);
+	let commitment_fee_sat = commit_tx_fee_sat_with_rgb(
+		feerate,
+		accepted_nondust_htlcs + offered_nondust_htlcs,
+		channel_type,
+		is_colored,
+	);
 	let second_stage_fees_sat =
 		htlc_tx_fees_sat(feerate, accepted_nondust_htlcs, offered_nondust_htlcs, channel_type);
 	let total_fees_msat = (commitment_fee_sat + second_stage_fees_sat) * 1000;
 
-	let extra_accepted_htlc_commitment_fee_sat = commit_tx_fee_sat(
+	let extra_accepted_htlc_commitment_fee_sat = commit_tx_fee_sat_with_rgb(
 		feerate,
 		accepted_nondust_htlcs + 1 + offered_nondust_htlcs,
 		channel_type,
+		is_colored,
 	);
 	let extra_accepted_htlc_second_stage_fees_sat =
 		htlc_tx_fees_sat(feerate, accepted_nondust_htlcs + 1, offered_nondust_htlcs, channel_type);
@@ -179,7 +185,16 @@ pub(crate) trait TxBuilder {
 		L::Target: Logger;
 }
 
-pub(crate) struct SpecTxBuilder {}
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SpecTxBuilder {
+	is_colored: bool,
+}
+
+impl SpecTxBuilder {
+	pub(crate) fn new(is_colored: bool) -> Self {
+		Self { is_colored }
+	}
+}
 
 impl TxBuilder for SpecTxBuilder {
 	fn get_next_commitment_stats(
@@ -236,10 +251,11 @@ impl TxBuilder for SpecTxBuilder {
 				!htlc.is_dust(local, feerate_per_kw, broadcaster_dust_limit_satoshis, channel_type)
 			})
 			.count();
-		let commit_tx_fee_sat = commit_tx_fee_sat(
+		let commit_tx_fee_sat = commit_tx_fee_sat_with_rgb(
 			feerate_per_kw,
 			nondust_htlc_count + addl_nondust_htlc_count,
 			channel_type,
+			self.is_colored,
 		);
 
 		// Calculate dust exposure on commitment transaction
@@ -268,6 +284,7 @@ impl TxBuilder for SpecTxBuilder {
 					excess_feerate,
 					broadcaster_dust_limit_satoshis,
 					channel_type,
+					self.is_colored,
 				);
 			(
 				dust_exposure_msat + excess_fees_msat,
@@ -290,7 +307,12 @@ impl TxBuilder for SpecTxBuilder {
 	fn commit_tx_fee_sat(
 		&self, feerate_per_kw: u32, nondust_htlc_count: usize, channel_type: &ChannelTypeFeatures,
 	) -> u64 {
-		commit_tx_fee_sat(feerate_per_kw, nondust_htlc_count, channel_type)
+		commit_tx_fee_sat_with_rgb(
+			feerate_per_kw,
+			nondust_htlc_count,
+			channel_type,
+			self.is_colored,
+		)
 	}
 	fn subtract_non_htlc_outputs(
 		&self, is_outbound_from_holder: bool, value_to_self_after_htlcs: u64,

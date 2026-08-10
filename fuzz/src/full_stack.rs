@@ -40,7 +40,8 @@ use lightning::chain::{BestBlock, ChannelMonitorUpdateStatus, Confirm, Listen};
 use lightning::events::Event;
 use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::{
-	ChainParameters, ChannelManager, InterceptId, PaymentId, RecipientOnionFields, Retry,
+	ChainParameters, ChannelManager, InterceptId, NextHopForward, PaymentId, RecipientOnionFields,
+	Retry,
 };
 use lightning::ln::functional_test_utils::*;
 use lightning::ln::inbound_payment::ExpandedKey;
@@ -711,7 +712,7 @@ pub fn do_test(mut data: &[u8], logger: &Arc<dyn Logger>) {
 			4 => {
 				let final_value_msat = slice_to_be24(get_slice!(3)) as u64;
 				let payment_params = PaymentParameters::from_node_id(get_pubkey!(), 42);
-				let params = RouteParameters::from_payment_params_and_value(
+				let params = RouteParameters::from_payment_params_and_value_without_rgb(
 					payment_params,
 					final_value_msat,
 				);
@@ -730,7 +731,7 @@ pub fn do_test(mut data: &[u8], logger: &Arc<dyn Logger>) {
 			15 => {
 				let final_value_msat = slice_to_be24(get_slice!(3)) as u64;
 				let payment_params = PaymentParameters::from_node_id(get_pubkey!(), 42);
-				let params = RouteParameters::from_payment_params_and_value(
+				let params = RouteParameters::from_payment_params_and_value_without_rgb(
 					payment_params,
 					final_value_msat,
 				);
@@ -752,7 +753,7 @@ pub fn do_test(mut data: &[u8], logger: &Arc<dyn Logger>) {
 			17 => {
 				let final_value_msat = slice_to_be24(get_slice!(3)) as u64;
 				let payment_params = PaymentParameters::from_node_id(get_pubkey!(), 42);
-				let params = RouteParameters::from_payment_params_and_value(
+				let params = RouteParameters::from_payment_params_and_value_without_rgb(
 					payment_params,
 					final_value_msat,
 				);
@@ -959,9 +960,13 @@ pub fn do_test(mut data: &[u8], logger: &Arc<dyn Logger>) {
 						channelmanager
 							.forward_intercepted_htlc(
 								id,
-								&chan.channel_id,
+								NextHopForward::ChannelId(
+									chan.counterparty.node_id,
+									&chan.channel_id,
+								),
 								chan.counterparty.node_id,
 								amt,
+								None,
 							)
 							.unwrap();
 					}

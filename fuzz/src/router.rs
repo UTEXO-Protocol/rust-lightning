@@ -368,7 +368,7 @@ pub fn do_test<Out: test_logger::Output>(data: &[u8], out: Out) {
 					first_hops,
 					node_pks.iter(),
 					|final_amt, final_delta, target: &PublicKey| {
-						RouteParameters::from_payment_params_and_value(
+						RouteParameters::from_payment_params_and_value_without_rgb(
 							PaymentParameters::from_node_id(*target, final_delta)
 								.with_route_hints(last_hops.clone())
 								.unwrap(),
@@ -414,7 +414,7 @@ pub fn do_test<Out: test_logger::Output>(data: &[u8], out: Out) {
 				let mut features = Bolt12InvoiceFeatures::empty();
 				features.set_basic_mpp_optional();
 				find_routes!(first_hops, [(dummy_pk, ())].iter(), |final_amt, _, _| {
-					RouteParameters::from_payment_params_and_value(
+					RouteParameters::from_payment_params_and_value_without_rgb(
 						PaymentParameters::blinded(last_hops.clone())
 							.with_bolt12_features(features.clone())
 							.unwrap(),

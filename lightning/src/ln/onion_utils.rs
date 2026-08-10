@@ -460,6 +460,7 @@ pub(super) fn build_trampoline_onion_payloads<'a>(
 	let (value_msat, cltv, _last_amount_rgb) = build_onion_payloads_callback(
 		blinded_tail.trampoline_hops.iter(),
 		Some(blinded_tail_with_hop_iter),
+		false,
 		total_msat,
 		recipient_onion,
 		starting_htlc_offset,
@@ -505,6 +506,7 @@ pub(super) fn build_onion_payloads<'a>(
 	let (value_msat, cltv, last_amount_rgb) = build_onion_payloads_callback(
 		path.hops.iter(),
 		blinded_tail_with_hop_iter,
+		path.hops.iter().any(|hop| hop.rgb_payment.is_some()),
 		total_msat,
 		recipient_onion,
 		starting_htlc_offset,
@@ -551,8 +553,8 @@ enum PayloadCallbackAction {
 // So the new logic splits fees and payment_amount. We only accumulate fees, and for every node in the "bitcoin side"
 // of the path we also set the payment_amount, while for the other nodes it will be 0.
 fn build_onion_payloads_callback<'a, 'b, H, B, F, OP>(
-	hops: H, mut blinded_tail: Option<BlindedTailDetails<'a, B>>, total_msat: u64,
-	recipient_onion: &'a RecipientOnionFields, starting_htlc_offset: u32,
+	hops: H, mut blinded_tail: Option<BlindedTailDetails<'a, B>>, uses_rgb_amounts: bool,
+	total_msat: u64, recipient_onion: &'a RecipientOnionFields, starting_htlc_offset: u32,
 	keysend_preimage: &Option<PaymentPreimage>, invoice_request: Option<&'a InvoiceRequest>,
 	mut callback: F,
 ) -> Result<(u64, u32, Option<(ContractId, u64)>), APIError>
@@ -564,8 +566,8 @@ where
 {
 	// The rgb_amount at the last hop
 	let mut last_rgb_payment = None;
-	let mut last_msat_amount = 0;
-	let mut cur_accumulated_fees = 0;
+	let mut last_msat_amount = 0u64;
+	let mut cur_accumulated_fees = 0u64;
 	let mut cur_cltv = starting_htlc_offset;
 	let mut last_hop_id = None;
 
@@ -573,11 +575,15 @@ where
 		// First hop gets special values so that it can check, on receipt, that everything is
 		// exactly as it should be (and the next hop isn't trying to probe to find out if we're
 		// the intended recipient).
-		let (value_msat, rgb_payment) = if last_msat_amount == 0 {
+		let (value_msat, rgb_payment) = if idx == 0 {
 			(hop.fee_msat(), hop.rgb_payment())
-		} else {
-			cur_accumulated_fees += hop.fee_msat();
+		} else if uses_rgb_amounts {
+			cur_accumulated_fees = cur_accumulated_fees
+				.checked_add(hop.fee_msat())
+				.ok_or(APIError::InvalidRoute { err: "Channel fees overflowed?".to_owned() })?;
 			(last_msat_amount, last_rgb_payment)
+		} else {
+			(last_msat_amount, None)
 		};
 		let cltv = if cur_cltv == starting_htlc_offset {
 			hop.cltv_expiry_delta().saturating_add(starting_htlc_offset)
@@ -593,6 +599,11 @@ where
 					excess_final_cltv_expiry_delta,
 					..
 				}) => {
+					if !uses_rgb_amounts {
+						last_msat_amount = last_msat_amount.checked_add(final_value_msat).ok_or(
+							APIError::InvalidRoute { err: "Channel fees overflowed?".to_owned() },
+						)?;
+					}
 					let mut blinding_point = Some(blinding_point);
 					let hops_len = hops.len();
 					for (i, blinded_hop) in hops.enumerate() {
@@ -627,8 +638,11 @@ where
 					trampoline_packet,
 					final_value_msat,
 				}) => {
-					// check this when adding support to trampoline hops in RLN
-					// cur_value_msat += final_value_msat;
+					if !uses_rgb_amounts {
+						last_msat_amount = last_msat_amount.checked_add(final_value_msat).ok_or(
+							APIError::InvalidRoute { err: "Channel fees overflowed?".to_owned() },
+						)?;
+					}
 					callback(
 						PayloadCallbackAction::PushBack,
 						OP::new_trampoline_entry(
@@ -665,9 +679,21 @@ where
 			);
 			callback(PayloadCallbackAction::PushFront, payload);
 		}
-		last_rgb_payment = hop.rgb_payment();
-		// check this when adding support to trampoline hops in RLN
-		last_msat_amount = hop.payment_amount().unwrap_or(0) + cur_accumulated_fees;
+		if uses_rgb_amounts {
+			last_rgb_payment = hop.rgb_payment();
+			// RGB swaps may cross from an asset leg to a bitcoin leg, so their explicit payment
+			// amount cannot be derived by monotonically accumulating the route's fees.
+			last_msat_amount = hop
+				.payment_amount()
+				.unwrap_or(0)
+				.checked_add(cur_accumulated_fees)
+				.ok_or(APIError::InvalidRoute { err: "Channel fees overflowed?".to_owned() })?;
+		} else {
+			last_rgb_payment = None;
+			last_msat_amount = last_msat_amount
+				.checked_add(hop.fee_msat())
+				.ok_or(APIError::InvalidRoute { err: "Channel fees overflowed?".to_owned() })?;
+		}
 		if last_msat_amount >= 21000000 * 100000000 * 1000 {
 			return Err(APIError::InvalidRoute { err: "Channel fees overflowed?".to_owned() });
 		}
@@ -733,6 +759,7 @@ pub(crate) fn set_max_path_length(
 	let build_payloads_res = build_onion_payloads_callback(
 		core::iter::once(&unblinded_route_hop),
 		blinded_tail_opt,
+		route_params.rgb_payment.is_some(),
 		final_value_msat_with_overpay_buffer,
 		&recipient_onion,
 		best_block_height,
@@ -3056,6 +3083,8 @@ mod tests {
 		Path {
 			hops: vec![
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(
 						&<Vec<u8>>::from_hex(
 							"02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619",
@@ -3071,6 +3100,8 @@ mod tests {
 					maybe_announced_channel: true, // We fill in the payloads manually instead of generating them from RouteHops.
 				},
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(
 						&<Vec<u8>>::from_hex(
 							"0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c",
@@ -3086,6 +3117,8 @@ mod tests {
 					maybe_announced_channel: true, // We fill in the payloads manually instead of generating them from RouteHops.
 				},
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(
 						&<Vec<u8>>::from_hex(
 							"027f31ebc5462c1fdce1b737ecff52d37d75dea43ce11c74d25aa297165faa2007",
@@ -3101,6 +3134,8 @@ mod tests {
 					maybe_announced_channel: true, // We fill in the payloads manually instead of generating them from RouteHops.
 				},
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(
 						&<Vec<u8>>::from_hex(
 							"032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
@@ -3116,6 +3151,8 @@ mod tests {
 					maybe_announced_channel: true, // We fill in the payloads manually instead of generating them from RouteHops.
 				},
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(
 						&<Vec<u8>>::from_hex(
 							"02edabbd16b41c8371b92ef2f04c1185b4f03b6dcd52ba9b78d9d7c89c8f221145",
@@ -3622,6 +3659,8 @@ mod tests {
 			hops: vec![
 				// Bob
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c").unwrap()).unwrap(),
 					node_features: NodeFeatures::empty(),
 					short_channel_id: 0,
@@ -3633,6 +3672,8 @@ mod tests {
 
 				// Carol
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("027f31ebc5462c1fdce1b737ecff52d37d75dea43ce11c74d25aa297165faa2007").unwrap()).unwrap(),
 					node_features: NodeFeatures::empty(),
 					short_channel_id: (572330 << 40) + (42 << 16) + 2821,
@@ -3902,6 +3943,8 @@ mod tests {
 			let pubkey = secret_key.public_key(&secp_ctx);
 
 			hops.push(RouteHop {
+				payment_amount: 0,
+				rgb_payment: None,
 				pubkey,
 				channel_features: ChannelFeatures::empty(),
 				node_features: NodeFeatures::empty(),
@@ -4064,6 +4107,7 @@ mod tests {
 		// `max_total_cltv_expiry_delta` is `u32::MAX`.
 		let recipient = PublicKey::from_slice(&[2; 33]).unwrap();
 		let mut route_params = RouteParameters {
+			rgb_payment: None,
 			payment_params: PaymentParameters::for_keysend(recipient, u32::MAX, true),
 			final_value_msat: u64::MAX,
 			max_total_routing_fee_msat: Some(u64::MAX),

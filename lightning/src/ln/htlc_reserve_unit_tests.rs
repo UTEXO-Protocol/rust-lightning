@@ -285,7 +285,8 @@ pub fn test_channel_reserve_holding_cell_htlcs() {
 			stat.value_to_self_msat
 				- (stat.pending_outbound_htlcs_amount_msat
 					+ recv_value_21 + recv_value_22
-					+ total_fee_msat + total_fee_msat
+					+ total_fee_msat
+					+ total_fee_msat
 					+ commit_tx_fee_3_htlcs),
 			stat.channel_reserve_msat
 		);
@@ -813,7 +814,7 @@ pub fn do_test_fee_spike_buffer(cfg: Option<UserConfig>, htlc_fails: bool) {
 	let payment_amt_msat = 3460001;
 	let onion_keys = onion_utils::construct_onion_keys(&secp_ctx, &route.paths[0], &session_priv);
 	let recipient_onion_fields = RecipientOnionFields::secret_only(payment_secret);
-	let (onion_payloads, htlc_msat, htlc_cltv) = onion_utils::build_onion_payloads(
+	let (onion_payloads, htlc_msat, htlc_cltv, _) = onion_utils::build_onion_payloads(
 		&route.paths[0],
 		payment_amt_msat,
 		&recipient_onion_fields,
@@ -827,6 +828,7 @@ pub fn do_test_fee_spike_buffer(cfg: Option<UserConfig>, htlc_fails: bool) {
 		onion_utils::construct_onion_packet(onion_payloads, onion_keys, [0; 32], &payment_hash)
 			.unwrap();
 	let msg = msgs::UpdateAddHTLC {
+		rgb_payment: None,
 		channel_id: chan.2,
 		htlc_id: 0,
 		amount_msat: htlc_msat,
@@ -879,6 +881,7 @@ pub fn do_test_fee_spike_buffer(cfg: Option<UserConfig>, htlc_fails: bool) {
 	// Build the remote commitment transaction so we can sign it, and then later use the
 	// signature for the commitment_signed message.
 	let accepted_htlc_info = chan_utils::HTLCOutputInCommitment {
+		rgb_payment: None,
 		offered: false,
 		amount_msat: payment_amt_msat,
 		cltv_expiry: htlc_cltv,
@@ -896,7 +899,7 @@ pub fn do_test_fee_spike_buffer(cfg: Option<UserConfig>, htlc_fails: bool) {
 		let channel = get_channel_ref!(nodes[0], nodes[1], per_peer_lock, peer_state_lock, chan.2);
 		let chan_signer = channel.as_funded().unwrap().get_signer();
 
-		let (commitment_tx, _stats) = SpecTxBuilder {}.build_commitment_transaction(
+		let (commitment_tx, _stats) = SpecTxBuilder::default().build_commitment_transaction(
 			false,
 			commitment_number,
 			&remote_point,
@@ -1052,7 +1055,7 @@ pub fn test_chan_reserve_violation_inbound_htlc_outbound_channel() {
 	let cur_height = nodes[1].node.best_block.read().unwrap().height + 1;
 	let onion_keys = onion_utils::construct_onion_keys(&secp_ctx, &route.paths[0], &session_priv);
 	let recipient_onion_fields = RecipientOnionFields::secret_only(payment_secret);
-	let (onion_payloads, htlc_msat, htlc_cltv) = onion_utils::build_onion_payloads(
+	let (onion_payloads, htlc_msat, htlc_cltv, _) = onion_utils::build_onion_payloads(
 		&route.paths[0],
 		700_000,
 		&recipient_onion_fields,
@@ -1066,6 +1069,7 @@ pub fn test_chan_reserve_violation_inbound_htlc_outbound_channel() {
 		onion_utils::construct_onion_packet(onion_payloads, onion_keys, [0; 32], &payment_hash)
 			.unwrap();
 	let msg = msgs::UpdateAddHTLC {
+		rgb_payment: None,
 		channel_id: chan.2,
 		htlc_id: MIN_AFFORDABLE_HTLC_COUNT as u64,
 		amount_msat: htlc_msat,
@@ -1232,7 +1236,7 @@ pub fn test_chan_reserve_violation_inbound_htlc_inbound_chan() {
 	let cur_height = nodes[0].node.best_block.read().unwrap().height + 1;
 	let onion_keys = onion_utils::construct_onion_keys(&secp_ctx, &route_2.paths[0], &session_priv);
 	let recipient_onion_fields = RecipientOnionFields::spontaneous_empty();
-	let (onion_payloads, htlc_msat, htlc_cltv) = onion_utils::build_onion_payloads(
+	let (onion_payloads, htlc_msat, htlc_cltv, _) = onion_utils::build_onion_payloads(
 		&route_2.paths[0],
 		recv_value_2,
 		&recipient_onion_fields,
@@ -1250,6 +1254,7 @@ pub fn test_chan_reserve_violation_inbound_htlc_inbound_chan() {
 	)
 	.unwrap();
 	let msg = msgs::UpdateAddHTLC {
+		rgb_payment: None,
 		channel_id: chan.2,
 		htlc_id: 1,
 		amount_msat: htlc_msat + 1,
@@ -1618,7 +1623,7 @@ pub fn test_update_add_htlc_bolt2_receiver_check_max_htlc_limit() {
 		&session_priv,
 	);
 	let recipient_onion_fields = RecipientOnionFields::secret_only(our_payment_secret);
-	let (onion_payloads, _htlc_msat, htlc_cltv) = onion_utils::build_onion_payloads(
+	let (onion_payloads, _htlc_msat, htlc_cltv, _) = onion_utils::build_onion_payloads(
 		&route.paths[0],
 		send_amt,
 		&recipient_onion_fields,
@@ -1633,6 +1638,7 @@ pub fn test_update_add_htlc_bolt2_receiver_check_max_htlc_limit() {
 			.unwrap();
 
 	let mut msg = msgs::UpdateAddHTLC {
+		rgb_payment: None,
 		channel_id: chan.2,
 		htlc_id: 0,
 		amount_msat: 1000,
@@ -2204,6 +2210,7 @@ pub fn do_test_dust_limit_fee_accounting(can_afford: bool) {
 			route_payment(&nodes[0], &[&nodes[1]], HTLC_AMT_SAT * 1000);
 		// Grab a snapshot of these HTLCs to manually build the commitment transaction later...
 		let accepted_htlc = chan_utils::HTLCOutputInCommitment {
+			rgb_payment: None,
 			offered: false,
 			amount_msat: HTLC_AMT_SAT * 1000,
 			// Hard-coded to match the expected value
@@ -2223,7 +2230,7 @@ pub fn do_test_dust_limit_fee_accounting(can_afford: bool) {
 	let onion_keys =
 		onion_utils::construct_onion_keys(&secp_ctx, &route_0_1.paths[0], &session_priv);
 	let recipient_onion_fields = RecipientOnionFields::secret_only(payment_secret_0_1);
-	let (onion_payloads, amount_msat, cltv_expiry) = onion_utils::build_onion_payloads(
+	let (onion_payloads, amount_msat, cltv_expiry, _) = onion_utils::build_onion_payloads(
 		&route_0_1.paths[0],
 		HTLC_AMT_SAT * 1000,
 		&recipient_onion_fields,
@@ -2239,6 +2246,7 @@ pub fn do_test_dust_limit_fee_accounting(can_afford: bool) {
 	// Double check the hard-coded value
 	assert_eq!(cltv_expiry, 81);
 	let msg = msgs::UpdateAddHTLC {
+		rgb_payment: None,
 		channel_id: chan_id,
 		htlc_id: MIN_AFFORDABLE_HTLC_COUNT as u64 - 1,
 		amount_msat,
@@ -2320,6 +2328,7 @@ pub fn do_test_dust_limit_fee_accounting(can_afford: bool) {
 			);
 
 		let accepted_htlc_info = chan_utils::HTLCOutputInCommitment {
+			rgb_payment: None,
 			offered: false,
 			amount_msat: HTLC_AMT_SAT * 1000,
 			cltv_expiry,

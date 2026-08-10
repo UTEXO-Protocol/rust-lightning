@@ -7,7 +7,6 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-/*
 use crate::blinded_path::message::MessageContext;
 use crate::blinded_path::message::{BlindedMessagePath, MessageForwardNode};
 use crate::blinded_path::payment::{BlindedPaymentPath, ReceiveTlvs};
@@ -252,6 +251,7 @@ impl<'a> Router for TestRouter<'a> {
 							} else {
 								let target_node_id = NodeId::from_pubkey(&hop.pubkey);
 								let route_hint = RouteHintHop {
+									htlc_maximum_rgb: None,
 									src_node_id: *prev_hop_node,
 									short_channel_id: hop.short_channel_id,
 									fees: RoutingFees { base_msat: 0, proportional_millionths: 0 },
@@ -384,10 +384,13 @@ impl<'a> MessageRouter for TestMessageRouter<'a> {
 		}
 	}
 
-	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification>(
-		&self, recipient: PublicKey, local_node_receive_key: ReceiveAuthKey,
-		context: MessageContext, peers: Vec<MessageForwardNode>, secp_ctx: &Secp256k1<T>,
-	) -> Result<Vec<BlindedMessagePath>, ()> {
+	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification, NS: core::ops::Deref>(
+		&self, recipient: PublicKey, node_signer: &NS, context: MessageContext,
+		peers: Vec<MessageForwardNode>, secp_ctx: &Secp256k1<T>,
+	) -> Result<Vec<BlindedMessagePath>, ()>
+	where
+		NS::Target: NodeSigner,
+	{
 		let mut peers = peers;
 		{
 			let peers_override = self.peers_override.lock().unwrap();
@@ -400,20 +403,12 @@ impl<'a> MessageRouter for TestMessageRouter<'a> {
 			}
 		}
 		match &self.inner {
-			TestMessageRouterInternal::Default(inner) => inner.create_blinded_paths(
-				recipient,
-				local_node_receive_key,
-				context,
-				peers,
-				secp_ctx,
-			),
-			TestMessageRouterInternal::NodeId(inner) => inner.create_blinded_paths(
-				recipient,
-				local_node_receive_key,
-				context,
-				peers,
-				secp_ctx,
-			),
+			TestMessageRouterInternal::Default(inner) => {
+				inner.create_blinded_paths(recipient, node_signer, context, peers, secp_ctx)
+			},
+			TestMessageRouterInternal::NodeId(inner) => {
+				inner.create_blinded_paths(recipient, node_signer, context, peers, secp_ctx)
+			},
 		}
 	}
 }
@@ -1450,6 +1445,7 @@ fn get_dummy_channel_announcement(short_chan_id: u64) -> msgs::ChannelAnnounceme
 	let node_1_btckey = SecretKey::from_slice(&[40; 32]).unwrap();
 	let node_2_btckey = SecretKey::from_slice(&[39; 32]).unwrap();
 	let unsigned_ann = msgs::UnsignedChannelAnnouncement {
+		contract_id: None,
 		features: ChannelFeatures::empty(),
 		chain_hash: ChainHash::using_genesis_block(network),
 		short_channel_id: short_chan_id,
@@ -1477,6 +1473,7 @@ pub fn get_dummy_channel_update(short_chan_id: u64) -> msgs::ChannelUpdate {
 	msgs::ChannelUpdate {
 		signature: Signature::from(unsafe { FFISignature::new() }),
 		contents: msgs::UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(network),
 			short_channel_id: short_chan_id,
 			timestamp: 0,
@@ -2264,4 +2261,3 @@ impl WalletSourceSync for TestWalletSource {
 		self.sign_tx(tx).map_err(|_| ())
 	}
 }
-*/

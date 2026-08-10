@@ -10,7 +10,6 @@
 //! A bunch of useful utilities for building networks of nodes and exchanging messages between
 //! nodes for functional tests.
 
-/*
 use crate::chain::channelmonitor::ChannelMonitor;
 use crate::chain::transaction::OutPoint;
 use crate::chain::{BestBlock, ChannelMonitorUpdateStatus, Confirm, Listen, Watch};
@@ -891,6 +890,10 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 				)>::read(
 					&mut io::Cursor::new(w.0),
 					ChannelManagerReadArgs {
+						ldk_data_dir: std::path::PathBuf::from("/tmp/ldk_test"),
+						rgb_kv_store: std::sync::Arc::new(crate::util::test_utils::TestStore::new(
+							false,
+						)),
 						config: self.node.get_current_config(),
 						entropy_source: self.keys_manager,
 						node_signer: self.keys_manager,
@@ -1351,6 +1354,8 @@ pub fn _reload_node<'a, 'b, 'c>(
 		<(BlockHash, TestChannelManager<'b, 'c>)>::read(
 			&mut node_read,
 			ChannelManagerReadArgs {
+				ldk_data_dir: std::path::PathBuf::from("/tmp/ldk_test"),
+				rgb_kv_store: std::sync::Arc::new(crate::util::test_utils::TestStore::new(false)),
 				config,
 				entropy_source: node.keys_manager,
 				node_signer: node.keys_manager,
@@ -1607,13 +1612,13 @@ pub fn exchange_open_accept_zero_conf_chan<'a, 'b, 'c, 'd>(
 		Event::OpenChannelRequest { temporary_channel_id, .. } => {
 			receiver
 				.node
-					.accept_inbound_channel_from_trusted_peer_0conf(
-						&temporary_channel_id,
-						&initiator_node_id,
-						0,
-						None,
-						channelmanager::ChannelFundingType::Regular,
-					)
+				.accept_inbound_channel_from_trusted_peer_0conf(
+					&temporary_channel_id,
+					&initiator_node_id,
+					0,
+					None,
+					channelmanager::ChannelFundingType::Regular,
+				)
 				.unwrap();
 		},
 		_ => panic!("Unexpected event"),
@@ -2900,10 +2905,11 @@ pub fn find_route(send_node: &Node, route_params: &RouteParameters) -> Result<Ro
 #[macro_export]
 macro_rules! get_route {
 	($send_node: expr, $payment_params: expr, $recv_value: expr) => {{
-		let route_params = $crate::routing::router::RouteParameters::from_payment_params_and_value(
-			$payment_params,
-			$recv_value,
-		);
+		let route_params =
+			$crate::routing::router::RouteParameters::from_payment_params_and_value_without_rgb(
+				$payment_params,
+				$recv_value,
+			);
 		$crate::ln::functional_test_utils::get_route(&$send_node, &route_params)
 	}};
 }
@@ -2930,7 +2936,7 @@ macro_rules! get_route_and_payment_hash {
 	}};
 	($send_node: expr, $recv_node: expr, $payment_params: expr, $recv_value: expr, $max_total_routing_fee_msat: expr) => {{
 		let mut route_params =
-			$crate::routing::router::RouteParameters::from_payment_params_and_value(
+			$crate::routing::router::RouteParameters::from_payment_params_and_value_without_rgb(
 				$payment_params,
 				$recv_value,
 			);
@@ -4167,7 +4173,8 @@ pub fn route_payment<'a, 'b, 'c>(
 	)
 	.with_bolt11_features(expected_route.last().unwrap().node.bolt11_invoice_features())
 	.unwrap();
-	let route_params = RouteParameters::from_payment_params_and_value(payment_params, recv_value);
+	let route_params =
+		RouteParameters::from_payment_params_and_value_without_rgb(payment_params, recv_value);
 	let route = get_route(origin_node, &route_params).unwrap();
 	assert_eq!(route.paths.len(), 1);
 	assert_eq!(route.paths[0].hops.len(), expected_route.len());
@@ -5622,4 +5629,3 @@ pub fn create_batch_channel_funding<'a, 'b, 'c>(
 	}
 	return (tx, funding_created_msgs);
 }
-*/

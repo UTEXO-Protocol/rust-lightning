@@ -263,6 +263,78 @@ fn do_test_funding_signed(signer_ops: Vec<SignerOp>) {
 }
 
 #[test]
+fn test_funding_signed_waits_for_initial_monitor_and_signer() {
+	do_test_funding_signed_waits_for_initial_monitor_and_signer(true);
+	do_test_funding_signed_waits_for_initial_monitor_and_signer(false);
+}
+
+fn do_test_funding_signed_waits_for_initial_monitor_and_signer(signer_ready_before_monitor: bool) {
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
+	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+	let node_a_id = nodes[0].node.get_our_node_id();
+	let node_b_id = nodes[1].node.get_our_node_id();
+
+	nodes[0].node.create_channel(node_b_id, 100_000, 10_001, 42, None, None).unwrap();
+	let open_channel = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, node_b_id);
+	nodes[1].node.handle_open_channel(node_a_id, &open_channel);
+	nodes[0].node.handle_accept_channel(
+		node_b_id,
+		&get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, node_a_id),
+	);
+
+	let (temporary_channel_id, funding_tx, _) =
+		create_funding_transaction(&nodes[0], &node_b_id, 100_000, 42);
+	nodes[0]
+		.node
+		.funding_transaction_generated(temporary_channel_id, node_b_id, funding_tx)
+		.unwrap();
+	let funding_created = get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, node_b_id);
+
+	nodes[1].disable_channel_signer_op(
+		&node_a_id,
+		&temporary_channel_id,
+		SignerOp::SignCounterpartyCommitment,
+	);
+	chanmon_cfgs[1].persister.set_update_ret(ChannelMonitorUpdateStatus::InProgress);
+	nodes[1].node.handle_funding_created(node_a_id, &funding_created);
+	check_added_monitors(&nodes[1], 1);
+	assert!(nodes[1].node.get_and_clear_pending_msg_events().is_empty());
+	assert!(nodes[1].node.get_and_clear_pending_events().is_empty());
+
+	let channel_id = nodes[1].node.list_channels()[0].channel_id;
+	if signer_ready_before_monitor {
+		nodes[1].enable_channel_signer_op(
+			&node_a_id,
+			&channel_id,
+			SignerOp::SignCounterpartyCommitment,
+		);
+		nodes[1].node.signer_unblocked(Some((node_a_id, channel_id)));
+		assert!(nodes[1].node.get_and_clear_pending_msg_events().is_empty());
+	}
+
+	chanmon_cfgs[1].persister.set_update_ret(ChannelMonitorUpdateStatus::Completed);
+	nodes[1].chain_monitor.complete_sole_pending_chan_update(&channel_id);
+	expect_channel_pending_event(&nodes[1], &node_a_id);
+
+	if !signer_ready_before_monitor {
+		assert!(nodes[1].node.get_and_clear_pending_msg_events().is_empty());
+		nodes[1].enable_channel_signer_op(
+			&node_a_id,
+			&channel_id,
+			SignerOp::SignCounterpartyCommitment,
+		);
+		nodes[1].node.signer_unblocked(Some((node_a_id, channel_id)));
+	}
+
+	let funding_signed = get_event_msg!(nodes[1], MessageSendEvent::SendFundingSigned, node_a_id);
+	assert_eq!(funding_signed.channel_id, channel_id);
+	nodes[1].node.signer_unblocked(Some((node_a_id, channel_id)));
+	assert!(nodes[1].node.get_and_clear_pending_msg_events().is_empty());
+}
+
+#[test]
 fn test_async_commitment_signature_for_commitment_signed() {
 	for i in 0..=8 {
 		let enable_signer_op_order = vec![

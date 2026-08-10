@@ -56,7 +56,7 @@ amplify = "4.8"
 bincode = "1.3"
 rgb-strict-encoding = "1.0.1"
 futures = "0.3"
-rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", tag = "v0.3.0-beta.32", features = [
+rgb-lib = { git = "https://github.com/Jainakin/rgb-lib.git", branch = "hardik/transactional-rgb-acceptance", features = [
     "electrum",
     "esplora",
 ] }

@@ -63,6 +63,7 @@ fn test_priv_forwarding_rejection() {
 	// ... however, if we send to nodes[2], we will have to pass the private channel from nodes[1]
 	// to nodes[2], which should be rejected:
 	let route_hint = RouteHint(vec![RouteHintHop {
+		htlc_maximum_rgb: None,
 		src_node_id: node_b_id,
 		short_channel_id: nodes[2].node.list_channels()[0].short_channel_id.unwrap(),
 		fees: RoutingFees { base_msat: 1000, proportional_millionths: 0 },
@@ -316,6 +317,7 @@ fn test_routed_scid_alias() {
 
 	let last_hop = nodes[2].node.list_usable_channels();
 	let hop_hints = vec![RouteHint(vec![RouteHintHop {
+		htlc_maximum_rgb: None,
 		src_node_id: node_b_id,
 		short_channel_id: last_hop[0].inbound_scid_alias.unwrap(),
 		fees: RoutingFees {
@@ -546,6 +548,7 @@ fn test_inbound_scid_privacy() {
 
 	let last_hop = nodes[2].node.list_usable_channels();
 	let mut hop_hints = vec![RouteHint(vec![RouteHintHop {
+		htlc_maximum_rgb: None,
 		src_node_id: node_b_id,
 		short_channel_id: last_hop[0].inbound_scid_alias.unwrap(),
 		fees: RoutingFees {
@@ -657,6 +660,7 @@ fn test_scid_alias_returned() {
 
 	let last_hop = nodes[2].node.list_usable_channels();
 	let mut hop_hints = vec![RouteHint(vec![RouteHintHop {
+		htlc_maximum_rgb: None,
 		src_node_id: node_b_id,
 		short_channel_id: last_hop[0].inbound_scid_alias.unwrap(),
 		fees: RoutingFees {

@@ -1175,6 +1175,7 @@ pub(super) struct MonitorRestoreUpdates {
 	pub channel_ready_order: ChannelReadyOrder,
 	pub announcement_sigs: Option<msgs::AnnouncementSignatures>,
 	pub tx_signatures: Option<msgs::TxSignatures>,
+	pub funding_signed: Option<msgs::FundingSigned>,
 }
 
 /// The return value of `signer_maybe_unblocked`
@@ -3310,11 +3311,12 @@ where
 
 		let is_v2_established = self.is_v2_established();
 		let context = self.context_mut();
-		let temporary_channel_id = context.channel_id;
-		context.channel_id = channel_id;
-		if context.is_colored() && temporary_channel_id != channel_id {
-			rename_rgb_files(&context.channel_id, &temporary_channel_id, context.rgb_kv_store.as_ref());
-		}
+			let temporary_channel_id = context.channel_id;
+			context.channel_id = channel_id;
+			if context.is_colored() && temporary_channel_id != channel_id {
+				rename_rgb_files(&context.channel_id, &temporary_channel_id, context.rgb_kv_store.as_ref())
+					.map_err(|error| ChannelError::close(format!("Failed to persist RGB channel ID transition: {error}")))?;
+			}
 
 		assert!(!context.channel_state.is_monitor_update_in_progress()); // We have not had any monitor(s) yet to fail update!
 		if !is_v2_established {
@@ -3599,9 +3601,12 @@ where
 		// check if the funder's amount for the initial commitment tx is sufficient
 		// for full fee payment plus a few HTLCs to ensure the channel will be useful.
 		let funders_amount_msat = open_channel_fields.funding_satoshis * 1000 - msg_push_msat;
-		let commit_tx_fee_sat = SpecTxBuilder {}.commit_tx_fee_sat(open_channel_fields.commitment_feerate_sat_per_1000_weight, MIN_AFFORDABLE_HTLC_COUNT, &channel_type);
+		let is_colored =
+			open_channel_fields.consignment_endpoint.is_some() || push_asset_amount.is_some();
+		let tx_builder = SpecTxBuilder::new(is_colored);
+		let commit_tx_fee_sat = tx_builder.commit_tx_fee_sat(open_channel_fields.commitment_feerate_sat_per_1000_weight, MIN_AFFORDABLE_HTLC_COUNT, &channel_type);
 		// Subtract any non-HTLC outputs from the remote balance
-		let (_, remote_balance_before_fee_msat) = SpecTxBuilder {}.subtract_non_htlc_outputs(false, value_to_self_msat, funders_amount_msat, &channel_type);
+		let (_, remote_balance_before_fee_msat) = tx_builder.subtract_non_htlc_outputs(false, value_to_self_msat, funders_amount_msat, &channel_type);
 		if remote_balance_before_fee_msat / 1000 < commit_tx_fee_sat {
 			return Err(ChannelError::close(format!("Funding amount ({} sats) can't even pay fee for initial commitment transaction fee of {} sats.", funders_amount_msat / 1000, commit_tx_fee_sat)));
 		}
@@ -3813,7 +3818,7 @@ where
 
 			interactive_tx_signing_session: None,
 
-			is_colored: funding.consignment_endpoint.is_some(),
+			is_colored: funding.consignment_endpoint.is_some() || funding.push_asset_amount.is_some(),
 			ldk_data_dir,
 			rgb_kv_store,
 		};
@@ -3878,9 +3883,11 @@ where
 		);
 
 		let value_to_self_msat = channel_value_satoshis * 1000 - push_msat;
-		let commit_tx_fee_sat = SpecTxBuilder {}.commit_tx_fee_sat(commitment_feerate, MIN_AFFORDABLE_HTLC_COUNT, &channel_type);
+		let is_colored = consignment_endpoint.is_some() || push_asset_amount.is_some();
+		let tx_builder = SpecTxBuilder::new(is_colored);
+		let commit_tx_fee_sat = tx_builder.commit_tx_fee_sat(commitment_feerate, MIN_AFFORDABLE_HTLC_COUNT, &channel_type);
 		// Subtract any non-HTLC outputs from the local balance
-		let (local_balance_before_fee_msat, _) = SpecTxBuilder {}.subtract_non_htlc_outputs(
+		let (local_balance_before_fee_msat, _) = tx_builder.subtract_non_htlc_outputs(
 			true,
 			value_to_self_msat,
 			push_msat,
@@ -4062,7 +4069,7 @@ where
 
 			interactive_tx_signing_session: None,
 
-			is_colored: funding.consignment_endpoint.is_some(),
+				is_colored: funding.consignment_endpoint.is_some() || funding.push_asset_amount.is_some(),
 			ldk_data_dir,
 			rgb_kv_store,
 		};
@@ -4812,7 +4819,8 @@ where
 		);
 		let next_value_to_self_msat = self.get_next_commitment_value_to_self_msat(true, funding);
 
-		let ret = SpecTxBuilder {}.get_next_commitment_stats(
+		let tx_builder = SpecTxBuilder::new(self.is_colored());
+		let ret = tx_builder.get_next_commitment_stats(
 			true,
 			funding.is_outbound(),
 			funding.get_value_satoshis(),
@@ -4834,7 +4842,7 @@ where
 					predicted_fee_sat: ret.commit_tx_fee_sat,
 				};
 			} else {
-				let predicted_stats = SpecTxBuilder {}
+				let predicted_stats = tx_builder
 					.get_next_commitment_stats(
 						true,
 						funding.is_outbound(),
@@ -4871,7 +4879,8 @@ where
 		);
 		let next_value_to_self_msat = self.get_next_commitment_value_to_self_msat(false, funding);
 
-		let ret = SpecTxBuilder {}.get_next_commitment_stats(
+		let tx_builder = SpecTxBuilder::new(self.is_colored());
+		let ret = tx_builder.get_next_commitment_stats(
 			false,
 			funding.is_outbound(),
 			funding.get_value_satoshis(),
@@ -4893,7 +4902,7 @@ where
 					predicted_fee_sat: ret.commit_tx_fee_sat,
 				};
 			} else {
-				let predicted_stats = SpecTxBuilder {}
+				let predicted_stats = tx_builder
 					.get_next_commitment_stats(
 						false,
 						funding.is_outbound(),
@@ -5542,7 +5551,7 @@ where
 
 		let value_to_self_msat = (funding.value_to_self_msat + value_to_self_claimed_msat).checked_sub(value_to_remote_claimed_msat).unwrap();
 
-		let (tx, stats) = SpecTxBuilder {}.build_commitment_transaction(
+		let (tx, stats) = SpecTxBuilder::new(self.is_colored()).build_commitment_transaction(
 			local,
 			commitment_number,
 			per_commitment_point,
@@ -5728,10 +5737,11 @@ where
 		}
 
 		let extra_nondust_htlc_on_counterparty_tx_dust_exposure_msat = excess_feerate_opt.map(|excess_feerate| {
-			let extra_htlc_commit_tx_fee_sat = SpecTxBuilder {}.commit_tx_fee_sat(excess_feerate, on_counterparty_tx_accepted_nondust_htlcs + 1 + on_counterparty_tx_offered_nondust_htlcs, funding.get_channel_type());
+			let tx_builder = SpecTxBuilder::new(self.is_colored());
+			let extra_htlc_commit_tx_fee_sat = tx_builder.commit_tx_fee_sat(excess_feerate, on_counterparty_tx_accepted_nondust_htlcs + 1 + on_counterparty_tx_offered_nondust_htlcs, funding.get_channel_type());
 			let extra_htlc_htlc_tx_fees_sat = chan_utils::htlc_tx_fees_sat(excess_feerate, on_counterparty_tx_accepted_nondust_htlcs + 1, on_counterparty_tx_offered_nondust_htlcs, funding.get_channel_type());
 
-			let commit_tx_fee_sat = SpecTxBuilder {}.commit_tx_fee_sat(excess_feerate, on_counterparty_tx_accepted_nondust_htlcs + on_counterparty_tx_offered_nondust_htlcs, funding.get_channel_type());
+			let commit_tx_fee_sat = tx_builder.commit_tx_fee_sat(excess_feerate, on_counterparty_tx_accepted_nondust_htlcs + on_counterparty_tx_offered_nondust_htlcs, funding.get_channel_type());
 			let htlc_tx_fees_sat = chan_utils::htlc_tx_fees_sat(excess_feerate, on_counterparty_tx_accepted_nondust_htlcs, on_counterparty_tx_offered_nondust_htlcs, funding.get_channel_type());
 
 			let extra_htlc_dust_exposure = on_counterparty_tx_dust_exposure_msat + (extra_htlc_commit_tx_fee_sat + extra_htlc_htlc_tx_fees_sat) * 1000;
@@ -5859,7 +5869,7 @@ where
 		let htlc_stats = context.get_pending_htlc_stats(funding, None, dust_exposure_limiting_feerate);
 
 		// Subtract any non-HTLC outputs from the local and remote balances
-		let (local_balance_before_fee_msat, remote_balance_before_fee_msat) = SpecTxBuilder {}.subtract_non_htlc_outputs(
+		let (local_balance_before_fee_msat, remote_balance_before_fee_msat) = SpecTxBuilder::new(self.is_colored()).subtract_non_htlc_outputs(
 			funding.is_outbound(),
 			funding.value_to_self_msat.saturating_sub(htlc_stats.pending_outbound_htlcs_value_msat),
 			(funding.get_value_satoshis() * 1000).checked_sub(funding.value_to_self_msat).unwrap().saturating_sub(htlc_stats.pending_inbound_htlcs_value_msat),
@@ -6076,7 +6086,7 @@ where
 		}
 
 		let num_htlcs = included_htlcs + addl_htlcs;
-		SpecTxBuilder {}.commit_tx_fee_sat(context.feerate_per_kw, num_htlcs, funding.get_channel_type()) * 1000
+		SpecTxBuilder::new(self.is_colored()).commit_tx_fee_sat(context.feerate_per_kw, num_htlcs, funding.get_channel_type()) * 1000
 	}
 
 	/// Get the commitment tx fee for the remote's next commitment transaction based on the number of
@@ -6153,7 +6163,7 @@ where
 		}
 
 		let num_htlcs = included_htlcs + addl_htlcs;
-		SpecTxBuilder {}.commit_tx_fee_sat(context.feerate_per_kw, num_htlcs, funding.get_channel_type()) * 1000
+		SpecTxBuilder::new(self.is_colored()).commit_tx_fee_sat(context.feerate_per_kw, num_htlcs, funding.get_channel_type()) * 1000
 	}
 
 	#[rustfmt::skip]
@@ -9674,9 +9684,10 @@ where
 				raa: None, commitment_update: None, commitment_order: RAACommitmentOrder::RevokeAndACKFirst,
 				accepted_htlcs, failed_htlcs, finalized_claimed_htlcs, pending_update_adds,
 				funding_broadcastable, channel_ready, announcement_sigs, tx_signatures: None,
-				channel_ready_order,
+				funding_signed: None, channel_ready_order,
 			};
 		}
+		let funding_signed = self.get_pending_funding_signed_msg(logger);
 
 		let mut raa = if self.context.monitor_pending_revoke_and_ack {
 			self.get_last_revoke_and_ack(path_for_release_htlc, logger)
@@ -9705,7 +9716,7 @@ where
 		MonitorRestoreUpdates {
 			raa, commitment_update, commitment_order, accepted_htlcs, failed_htlcs, finalized_claimed_htlcs,
 			pending_update_adds, funding_broadcastable, channel_ready, announcement_sigs, tx_signatures: None,
-			channel_ready_order,
+			funding_signed, channel_ready_order,
 		}
 	}
 
@@ -9766,14 +9777,14 @@ where
 	/// Indicates that the signer may have some signatures for us, so we should retry if we're
 	/// blocked.
 	#[rustfmt::skip]
-	pub fn signer_maybe_unblocked<L: Deref, CBP>(
-		&mut self, logger: &L, path_for_release_htlc: CBP
-	) -> SignerResumeUpdates where L::Target: Logger, CBP: Fn(u64) -> BlindedMessagePath {
-		if !self.holder_commitment_point.can_advance() {
-			log_trace!(logger, "Attempting to update holder per-commitment point...");
-			self.holder_commitment_point.try_resolve_pending(&self.context.holder_signer, &self.context.secp_ctx, logger);
+	fn get_pending_funding_signed_msg<L: Deref>(&mut self, logger: &L) -> Option<msgs::FundingSigned>
+	where L::Target: Logger {
+		if !self.context.signer_pending_funding || self.funding.is_outbound() ||
+			self.context.channel_state.is_monitor_update_in_progress()
+		{
+			return None;
 		}
-		let funding_signed = if self.context.signer_pending_funding && !self.funding.is_outbound() {
+
 			let mut commitment_data = self.context.build_commitment_transaction(&self.funding,
 				// The previous transaction number (i.e., when adding 1) is used because this field
 				// is advanced when handling funding_created, but the point is not advanced until
@@ -9785,7 +9796,17 @@ where
 			}
 			let counterparty_initial_commitment_tx = commitment_data.tx;
 			self.context.get_funding_signed_msg(&self.funding.channel_transaction_parameters, logger, counterparty_initial_commitment_tx)
-		} else { None };
+	}
+
+	#[rustfmt::skip]
+	pub fn signer_maybe_unblocked<L: Deref, CBP>(
+		&mut self, logger: &L, path_for_release_htlc: CBP
+	) -> SignerResumeUpdates where L::Target: Logger, CBP: Fn(u64) -> BlindedMessagePath {
+		if !self.holder_commitment_point.can_advance() {
+			log_trace!(logger, "Attempting to update holder per-commitment point...");
+			self.holder_commitment_point.try_resolve_pending(&self.context.holder_signer, &self.context.secp_ctx, logger);
+		}
+		let funding_signed = self.get_pending_funding_signed_msg(logger);
 		// Provide a `channel_ready` message if we need to, but only if we're _not_ still pending
 		// funding.
 		let channel_ready = if self.context.signer_pending_channel_ready && !self.context.signer_pending_funding {
@@ -12684,9 +12705,11 @@ where
 		&self, funding: &FundingScope,
 	) -> Result<(Amount, Amount), String> {
 		let include_counterparty_unknown_htlcs = true;
-		// Make sure that that the funder of the channel can pay the transaction fees for an additional
-		// nondust HTLC on the channel.
-		let addl_nondust_htlc_count = 1;
+		// Make sure the channel funder can pay the transaction fees for one additional nondust
+		// HTLC. P2A commitments have a fixed zero fee, so an additional HTLC does not increase the
+		// commitment fee and must not be included in the fee-reserve calculation.
+		let addl_nondust_htlc_count =
+			usize::from(!funding.get_channel_type().supports_anchor_zero_fee_commitments());
 		// We are not interested in dust exposure
 		let dust_exposure_limiting_feerate = None;
 
@@ -13674,13 +13697,32 @@ impl<SP: Deref> OutboundV1Channel<SP>
 where
 	SP::Target: SignerProvider,
 {
+	#[cfg(any(test, feature = "_test_utils"))]
+	#[rustfmt::skip]
+	pub fn new<ES: Deref, F: Deref, L: Deref>(
+		fee_estimator: &LowerBoundedFeeEstimator<F>, entropy_source: &ES, signer_provider: &SP, counterparty_node_id: PublicKey, their_features: &InitFeatures,
+		channel_value_satoshis: u64, push_msat: u64, user_id: u128, config: &UserConfig, current_chain_height: u32,
+		outbound_scid_alias: u64, temporary_channel_id: Option<ChannelId>, logger: L,
+	) -> Result<OutboundV1Channel<SP>, APIError>
+	where ES::Target: EntropySource,
+	      F::Target: FeeEstimator,
+	      L::Target: Logger,
+	{
+		Self::new_with_rgb(
+			fee_estimator, entropy_source, signer_provider, counterparty_node_id, their_features,
+			channel_value_satoshis, push_msat, user_id, config, current_chain_height,
+			outbound_scid_alias, temporary_channel_id, logger, None, PathBuf::from("/tmp/ldk_test"),
+			None, Arc::new(crate::util::test_utils::TestStore::new(false)),
+		)
+	}
+
 	pub fn abandon_unfunded_chan(&mut self, closure_reason: ClosureReason) -> ShutdownResult {
 		self.context.force_shutdown(&self.funding, closure_reason)
 	}
 
 	#[allow(dead_code)] // TODO(dual_funding): Remove once opending V2 channels is enabled.
 	#[rustfmt::skip]
-	pub fn new<ES: Deref, F: Deref, L: Deref>(
+	pub fn new_with_rgb<ES: Deref, F: Deref, L: Deref>(
 		fee_estimator: &LowerBoundedFeeEstimator<F>, entropy_source: &ES, signer_provider: &SP, counterparty_node_id: PublicKey, their_features: &InitFeatures,
 		channel_value_satoshis: u64, push_msat: u64, user_id: u128, config: &UserConfig, current_chain_height: u32,
 		outbound_scid_alias: u64, temporary_channel_id: Option<ChannelId>, logger: L, consignment_endpoint: Option<RgbTransport>, ldk_data_dir: PathBuf, push_asset_amount: Option<u64>,
@@ -13807,12 +13849,8 @@ where
 
 		// Now that we're past error-generating stuff, update our local state:
 
-		self.context.channel_state = ChannelState::FundingNegotiated(FundingNegotiatedFlags::new());
-		let temporary_channel_id = self.context.channel_id;
-		self.context.channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
-		if self.context.is_colored() {
-			rename_rgb_files(&self.context.channel_id, &temporary_channel_id, self.context.rgb_kv_store.as_ref());
-		}
+			self.context.channel_state = ChannelState::FundingNegotiated(FundingNegotiatedFlags::new());
+			self.context.channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
 
 		// If the funding transaction is a coinbase transaction, we need to set the minimum depth to 100.
 		// We can skip this if it is a zero-conf channel.
@@ -14058,10 +14096,30 @@ impl<SP: Deref> InboundV1Channel<SP>
 where
 	SP::Target: SignerProvider,
 {
+	#[cfg(any(test, feature = "_test_utils"))]
+	#[rustfmt::skip]
+	pub fn new<ES: Deref, F: Deref, L: Deref>(
+		fee_estimator: &LowerBoundedFeeEstimator<F>, entropy_source: &ES, signer_provider: &SP,
+		counterparty_node_id: PublicKey, our_supported_features: &ChannelTypeFeatures,
+		their_features: &InitFeatures, msg: &msgs::OpenChannel, user_id: u128, config: &UserConfig,
+		current_chain_height: u32, logger: &L, is_0conf: bool,
+	) -> Result<InboundV1Channel<SP>, ChannelError>
+	where ES::Target: EntropySource,
+	      F::Target: FeeEstimator,
+	      L::Target: Logger,
+	{
+		Self::new_with_rgb(
+			fee_estimator, entropy_source, signer_provider, counterparty_node_id,
+			our_supported_features, their_features, msg, user_id, config, current_chain_height,
+			logger, is_0conf, false, PathBuf::from("/tmp/ldk_test"),
+			Arc::new(crate::util::test_utils::TestStore::new(false)),
+		)
+	}
+
 	/// Creates a new channel from a remote sides' request for one.
 	/// Assumes chain_hash has already been checked and corresponds with what we expect!
 	#[rustfmt::skip]
-	pub fn new<ES: Deref, F: Deref, L: Deref>(
+	pub fn new_with_rgb<ES: Deref, F: Deref, L: Deref>(
 		fee_estimator: &LowerBoundedFeeEstimator<F>, entropy_source: &ES, signer_provider: &SP,
 		counterparty_node_id: PublicKey, our_supported_features: &ChannelTypeFeatures,
 		their_features: &InitFeatures, msg: &msgs::OpenChannel, user_id: u128, config: &UserConfig,
@@ -16067,7 +16125,6 @@ pub(crate) fn hold_time_since(send_timestamp: Option<Duration>) -> Option<u32> {
 	})
 }
 
-/*
 #[cfg(test)]
 mod tests {
 	use crate::chain::chaininterface::LowerBoundedFeeEstimator;
@@ -16327,6 +16384,7 @@ mod tests {
 		// Put some inbound and outbound HTLCs in A's channel.
 		let htlc_amount_msat = 11_092_000; // put an amount below A's effective dust limit but above B's.
 		node_a_chan.context.pending_inbound_htlcs.push(InboundHTLCOutput {
+			rgb_payment: None,
 			htlc_id: 0,
 			amount_msat: htlc_amount_msat,
 			payment_hash: PaymentHash(Sha256::hash(&[42; 32]).to_byte_array()),
@@ -16335,6 +16393,7 @@ mod tests {
 		});
 
 		node_a_chan.context.pending_outbound_htlcs.push(OutboundHTLCOutput {
+			rgb_payment: None,
 			htlc_id: 1,
 			amount_msat: htlc_amount_msat, // put an amount below A's dust amount but above B's.
 			payment_hash: PaymentHash(Sha256::hash(&[43; 32]).to_byte_array()),
@@ -16663,6 +16722,7 @@ mod tests {
 		// Make sure that receiving a channel update will update the Channel as expected.
 		let update = ChannelUpdate {
 			contents: UnsignedChannelUpdate {
+				htlc_maximum_rgb: 0,
 				chain_hash,
 				short_channel_id: 0,
 				timestamp: 0,
@@ -16780,6 +16840,8 @@ mod tests {
 		let dummy_htlc_source = HTLCSource::OutboundRoute {
 			path: Path {
 				hops: vec![RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: test_utils::pubkey(2),
 					channel_features: ChannelFeatures::empty(),
 					node_features: NodeFeatures::empty(),
@@ -16796,6 +16858,7 @@ mod tests {
 			bolt12_invoice: None,
 		};
 		let dummy_outbound_output = OutboundHTLCOutput {
+			rgb_payment: None,
 			htlc_id: 0,
 			amount_msat: 0,
 			payment_hash: PaymentHash([43; 32]),
@@ -16819,6 +16882,7 @@ mod tests {
 		chan.context.pending_outbound_htlcs = pending_outbound_htlcs.clone();
 
 		let dummy_holding_cell_add_htlc = HTLCUpdateAwaitingACK::AddHTLC {
+			rgb_payment: None,
 			amount_msat: 0,
 			cltv_expiry: 0,
 			payment_hash: PaymentHash([43; 32]),
@@ -16899,9 +16963,17 @@ mod tests {
 		let mut reader =
 			crate::util::ser::FixedLengthReader::new(&mut s, encoded_chan.len() as u64);
 		let features = channelmanager::provided_channel_type_features(&config);
-		let decoded_chan =
-			FundedChannel::read(&mut reader, (&&keys_provider, &&keys_provider, &features))
-				.unwrap();
+		let decoded_chan = FundedChannel::read(
+			&mut reader,
+			(
+				&&keys_provider,
+				&&keys_provider,
+				&features,
+				std::path::PathBuf::new(),
+				std::sync::Arc::new(test_utils::TestStore::new(false)),
+			),
+		)
+		.unwrap();
 		assert_eq!(decoded_chan.context.pending_outbound_htlcs, pending_outbound_htlcs);
 		assert_eq!(decoded_chan.context.holding_cell_htlc_updates, holding_cell_htlc_updates);
 	}
@@ -18088,4 +18160,3 @@ mod tests {
 		}
 	}
 }
-*/

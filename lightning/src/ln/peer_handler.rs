@@ -1189,7 +1189,8 @@ impl<Descriptor: SocketDescriptor, RM: Deref, L: Deref, NS: Deref>
 		IgnoringMessageHandler,
 		NS,
 		IgnoringMessageHandler,
-	> where
+	>
+where
 	RM::Target: RoutingMessageHandler,
 	L::Target: Logger,
 	NS::Target: NodeSigner,
@@ -3521,7 +3522,7 @@ where
 			let flush_read_disabled =
 				self.gossip_processing_backlog_lifted.swap(false, Ordering::Relaxed);
 
-			'outer: for (descriptor, peer_mutex) in peers_lock.iter() {
+			for (descriptor, peer_mutex) in peers_lock.iter() {
 				let mut peer = peer_mutex.lock().unwrap();
 				if flush_read_disabled {
 					peer.received_channel_announce_since_backlogged = false;
@@ -3556,15 +3557,8 @@ where
 						as u64
 						> MAX_BUFFER_DRAIN_TICK_INTERVALS_PER_PEER as u64 * peers_lock.len() as u64;
 					if not_recently_active || reached_threshold_intervals {
-						log_info!(
-							self.logger,
-							"PeerManager timer_tick_occurred skip disconnect push"
-						);
-						peer.awaiting_pong_timer_tick_intervals = 0;
-						peer.received_message_since_timer_tick = true;
-						continue 'outer;
-						//descriptors_needing_disconnect.push(descriptor.clone());
-						//break;
+						descriptors_needing_disconnect.push(descriptor.clone());
+						break;
 					}
 					peer.received_message_since_timer_tick = false;
 

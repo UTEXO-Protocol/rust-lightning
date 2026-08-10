@@ -37,6 +37,7 @@ pub(crate) fn channel_announcement(
 	let node_id_2 = NodeId::from_pubkey(&PublicKey::from_secret_key(&secp_ctx, node_2_privkey));
 
 	let unsigned_announcement = UnsignedChannelAnnouncement {
+		contract_id: None,
 		features,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id,
@@ -165,6 +166,7 @@ pub(super) fn build_line_graph() -> (
 			add_channel(&gossip_sync, &secp_ctx, &cur_privkey, &next_privkey,
 				ChannelFeatures::from_le_bytes(id_to_feature_flags(1)), cur_short_channel_id);
 			update_channel(&gossip_sync, &secp_ctx, &cur_privkey, UnsignedChannelUpdate {
+				htlc_maximum_rgb: 0,
 				chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 				short_channel_id: cur_short_channel_id,
 				timestamp: idx as u32,
@@ -178,6 +180,7 @@ pub(super) fn build_line_graph() -> (
 				excess_data: Vec::new()
 			});
 			update_channel(&gossip_sync, &secp_ctx, &next_privkey, UnsignedChannelUpdate {
+				htlc_maximum_rgb: 0,
 				chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 				short_channel_id: cur_short_channel_id,
 				timestamp: (idx as u32)+1,
@@ -272,6 +275,7 @@ pub(super) fn build_graph() -> (
 
 	add_channel(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[0], ChannelFeatures::from_le_bytes(id_to_feature_flags(1)), 1);
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 1,
 		timestamp: 1,
@@ -289,6 +293,7 @@ pub(super) fn build_graph() -> (
 
 	add_channel(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[1], ChannelFeatures::from_le_bytes(id_to_feature_flags(2)), 2);
 	update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 2,
 		timestamp: 1,
@@ -302,6 +307,7 @@ pub(super) fn build_graph() -> (
 		excess_data: Vec::new()
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 2,
 		timestamp: 1,
@@ -319,6 +325,7 @@ pub(super) fn build_graph() -> (
 
 	add_channel(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[7], ChannelFeatures::from_le_bytes(id_to_feature_flags(12)), 12);
 	update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 12,
 		timestamp: 1,
@@ -332,6 +339,7 @@ pub(super) fn build_graph() -> (
 		excess_data: Vec::new()
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 12,
 		timestamp: 1,
@@ -349,6 +357,7 @@ pub(super) fn build_graph() -> (
 
 	add_channel(&gossip_sync, &secp_ctx, &privkeys[0], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(3)), 3);
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 3,
 		timestamp: 1,
@@ -362,6 +371,7 @@ pub(super) fn build_graph() -> (
 		excess_data: Vec::new()
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 3,
 		timestamp: 1,
@@ -377,6 +387,7 @@ pub(super) fn build_graph() -> (
 
 	add_channel(&gossip_sync, &secp_ctx, &privkeys[1], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(4)), 4);
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 4,
 		timestamp: 1,
@@ -390,6 +401,7 @@ pub(super) fn build_graph() -> (
 		excess_data: Vec::new()
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 4,
 		timestamp: 1,
@@ -405,6 +417,7 @@ pub(super) fn build_graph() -> (
 
 	add_channel(&gossip_sync, &secp_ctx, &privkeys[7], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(13)), 13);
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 13,
 		timestamp: 1,
@@ -418,6 +431,7 @@ pub(super) fn build_graph() -> (
 		excess_data: Vec::new()
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 13,
 		timestamp: 1,
@@ -435,6 +449,7 @@ pub(super) fn build_graph() -> (
 
 	add_channel(&gossip_sync, &secp_ctx, &privkeys[2], &privkeys[4], ChannelFeatures::from_le_bytes(id_to_feature_flags(6)), 6);
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 6,
 		timestamp: 1,
@@ -448,6 +463,7 @@ pub(super) fn build_graph() -> (
 		excess_data: Vec::new()
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[4], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 6,
 		timestamp: 1,
@@ -463,6 +479,7 @@ pub(super) fn build_graph() -> (
 
 	add_channel(&gossip_sync, &secp_ctx, &privkeys[4], &privkeys[3], ChannelFeatures::from_le_bytes(id_to_feature_flags(11)), 11);
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[4], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 11,
 		timestamp: 1,
@@ -476,6 +493,7 @@ pub(super) fn build_graph() -> (
 		excess_data: Vec::new()
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[3], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 11,
 		timestamp: 1,
@@ -495,6 +513,7 @@ pub(super) fn build_graph() -> (
 
 	add_channel(&gossip_sync, &secp_ctx, &privkeys[2], &privkeys[5], ChannelFeatures::from_le_bytes(id_to_feature_flags(7)), 7);
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 7,
 		timestamp: 1,
@@ -508,6 +527,7 @@ pub(super) fn build_graph() -> (
 		excess_data: Vec::new()
 	});
 	update_channel(&gossip_sync, &secp_ctx, &privkeys[5], UnsignedChannelUpdate {
+		htlc_maximum_rgb: 0,
 		chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 		short_channel_id: 7,
 		timestamp: 1,

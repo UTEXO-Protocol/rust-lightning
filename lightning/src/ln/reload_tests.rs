@@ -18,7 +18,7 @@ use crate::routing::router::{PaymentParameters, RouteParameters};
 use crate::sign::EntropySource;
 use crate::chain::transaction::OutPoint;
 use crate::events::{ClosureReason, Event, HTLCHandlingFailureType};
-use crate::ln::channelmanager::{ChannelManager, ChannelManagerReadArgs, PaymentId, RecipientOnionFields, RAACommitmentOrder};
+use crate::ln::channelmanager::{ChannelManager, ChannelManagerReadArgs, NextHopForward, PaymentId, RecipientOnionFields, RAACommitmentOrder};
 use crate::ln::msgs;
 use crate::ln::types::ChannelId;
 use crate::ln::msgs::{BaseMessageHandler, ChannelMessageHandler, RoutingMessageHandler, ErrorAction, MessageSendEvent};
@@ -426,6 +426,8 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 	let mut nodes_0_read = &nodes_0_serialized[..];
 	if let Err(msgs::DecodeError::DangerousValue) =
 		<(BlockHash, ChannelManager<&test_utils::TestChainMonitor, &test_utils::TestBroadcaster, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestFeeEstimator, &test_utils::TestRouter, &test_utils::TestMessageRouter, &test_utils::TestLogger>)>::read(&mut nodes_0_read, ChannelManagerReadArgs {
+			ldk_data_dir: std::path::PathBuf::from("/tmp/ldk_test"),
+			rgb_kv_store: std::sync::Arc::new(crate::util::test_utils::TestStore::new(false)),
 		config: UserConfig::default(),
 		entropy_source: keys_manager,
 		node_signer: keys_manager,
@@ -444,6 +446,8 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 	let mut nodes_0_read = &nodes_0_serialized[..];
 	let (_, nodes_0_deserialized_tmp) =
 		<(BlockHash, ChannelManager<&test_utils::TestChainMonitor, &test_utils::TestBroadcaster, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestKeysInterface, &test_utils::TestFeeEstimator, &test_utils::TestRouter, &test_utils::TestMessageRouter, &test_utils::TestLogger>)>::read(&mut nodes_0_read, ChannelManagerReadArgs {
+			ldk_data_dir: std::path::PathBuf::from("/tmp/ldk_test"),
+			rgb_kv_store: std::sync::Arc::new(crate::util::test_utils::TestStore::new(false)),
 		config: UserConfig::default(),
 		entropy_source: keys_manager,
 		node_signer: keys_manager,
@@ -539,7 +543,7 @@ fn do_test_data_loss_protect(reconnect_panicing: bool, substantially_old: bool, 
 		// revoked at least two revocations ago, not the latest revocation. Here, we use
 		// `not_stale` to test the boundary condition.
 		let pay_params = PaymentParameters::for_keysend(nodes[1].node.get_our_node_id(), 100, false);
-		let route_params = RouteParameters::from_payment_params_and_value(pay_params, 40000);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(pay_params, 40000);
 		nodes[0].node.send_spontaneous_payment(None, RecipientOnionFields::spontaneous_empty(), PaymentId([0; 32]), route_params, Retry::Attempts(0)).unwrap();
 		check_added_monitors(&nodes[0], 1);
 		let update_add_commit = SendEvent::from_node(&nodes[0]);
@@ -976,8 +980,9 @@ fn do_forwarded_payment_no_manager_persistence(use_cs_commitment: bool, claim_ht
 			},
 			_ => panic!()
 		}
-		nodes[1].node.forward_intercepted_htlc(intercept_id.unwrap(), &chan_id_2,
-			nodes[2].node.get_our_node_id(), expected_outbound_amount_msat.unwrap()).unwrap();
+		nodes[1].node.forward_intercepted_htlc(intercept_id.unwrap(),
+			NextHopForward::ChannelId(nodes[2].node.get_our_node_id(), &chan_id_2),
+			nodes[2].node.get_our_node_id(), expected_outbound_amount_msat.unwrap(), None).unwrap();
 	}
 
 	nodes[1].node.process_pending_htlc_forwards();
@@ -1021,8 +1026,9 @@ fn do_forwarded_payment_no_manager_persistence(use_cs_commitment: bool, claim_ht
 	if use_intercept {
 		// Attempt to forward the HTLC back out over nodes[1]' still-open channel, ensuring we get
 		// a intercept-doesn't-exist error.
-		let forward_err = nodes[1].node.forward_intercepted_htlc(intercept_id.unwrap(), &chan_id_1,
-			nodes[0].node.get_our_node_id(), expected_outbound_amount_msat.unwrap()).unwrap_err();
+		let forward_err = nodes[1].node.forward_intercepted_htlc(intercept_id.unwrap(),
+			NextHopForward::ChannelId(nodes[0].node.get_our_node_id(), &chan_id_1),
+			nodes[0].node.get_our_node_id(), expected_outbound_amount_msat.unwrap(), None).unwrap_err();
 		assert_eq!(forward_err, APIError::APIMisuseError {
 			err: format!("Payment with intercept id {} not found", log_bytes!(intercept_id.unwrap().0))
 		});
@@ -1254,7 +1260,7 @@ fn test_htlc_localremoved_persistence() {
 	let payee_pubkey = nodes[1].node.get_our_node_id();
 
 	let _chan = create_chan_between_nodes(&nodes[0], &nodes[1]);
-	let route_params = RouteParameters::from_payment_params_and_value(
+	let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 		PaymentParameters::for_keysend(payee_pubkey, 40, false), 10_000);
 	let route = find_route(
 		&nodes[0], &route_params
@@ -1500,4 +1506,3 @@ fn test_hold_completed_inflight_monitor_updates_upon_manager_reload() {
 	reconnect_args.pending_htlc_adds = (0, 1);
 	reconnect_nodes(reconnect_args);
 }
-

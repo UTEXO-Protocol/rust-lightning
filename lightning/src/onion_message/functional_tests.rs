@@ -435,9 +435,9 @@ fn one_blinded_hop() {
 	let secp_ctx = Secp256k1::new();
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[1].entropy_source;
-	let receive_key = nodes[1].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[1].messenger.node_signer;
 	let blinded_path =
-		BlindedMessagePath::new(&[], nodes[1].node_id, receive_key, context, entropy, &secp_ctx);
+		BlindedMessagePath::new(&[], nodes[1].node_id, node_signer, context, entropy, &secp_ctx);
 	let destination = Destination::BlindedPath(blinded_path);
 	let instructions = MessageSendInstructions::WithoutReplyPath { destination };
 	nodes[0].messenger.send_onion_message(test_msg, instructions).unwrap();
@@ -453,12 +453,12 @@ fn blinded_path_with_dummy_hops() {
 	let secp_ctx = Secp256k1::new();
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[1].entropy_source;
-	let receive_key = nodes[1].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[1].messenger.node_signer;
 	let blinded_path = BlindedMessagePath::new_with_dummy_hops(
 		&[],
 		nodes[1].node_id,
 		TEST_DUMMY_HOP_COUNT,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,
@@ -482,11 +482,11 @@ fn two_unblinded_two_blinded() {
 		[MessageForwardNode { node_id: nodes[3].node_id, short_channel_id: None }];
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[4].entropy_source;
-	let receive_key = nodes[4].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[4].messenger.node_signer;
 	let blinded_path = BlindedMessagePath::new(
 		&intermediate_nodes,
 		nodes[4].node_id,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,
@@ -514,11 +514,11 @@ fn three_blinded_hops() {
 	];
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[3].entropy_source;
-	let receive_key = nodes[3].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[3].messenger.node_signer;
 	let blinded_path = BlindedMessagePath::new(
 		&intermediate_nodes,
 		nodes[3].node_id,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,
@@ -547,9 +547,9 @@ fn async_response_over_one_blinded_hop() {
 	let secp_ctx = Secp256k1::new();
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[1].entropy_source;
-	let receive_key = nodes[1].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[1].messenger.node_signer;
 	let reply_path =
-		BlindedMessagePath::new(&[], nodes[1].node_id, receive_key, context, entropy, &secp_ctx);
+		BlindedMessagePath::new(&[], nodes[1].node_id, node_signer, context, entropy, &secp_ctx);
 
 	// 4. Create a responder using the reply path for Alice.
 	let responder = Some(Responder::new(reply_path));
@@ -588,9 +588,9 @@ fn async_response_with_reply_path_succeeds() {
 	let message = TestCustomMessage::Ping;
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*bob.entropy_source;
-	let receive_key = bob.messenger.node_signer.get_receive_auth_key();
+	let node_signer = &bob.messenger.node_signer;
 	let reply_path =
-		BlindedMessagePath::new(&[], bob.node_id, receive_key, context, entropy, &secp_ctx);
+		BlindedMessagePath::new(&[], bob.node_id, node_signer, context, entropy, &secp_ctx);
 
 	// Alice asynchronously responds to Bob, expecting a response back from him.
 	let responder = Responder::new(reply_path);
@@ -630,9 +630,9 @@ fn async_response_with_reply_path_fails() {
 	let message = TestCustomMessage::Ping;
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*bob.entropy_source;
-	let receive_key = bob.messenger.node_signer.get_receive_auth_key();
+	let node_signer = &bob.messenger.node_signer;
 	let reply_path =
-		BlindedMessagePath::new(&[], bob.node_id, receive_key, context, entropy, &secp_ctx);
+		BlindedMessagePath::new(&[], bob.node_id, node_signer, context, entropy, &secp_ctx);
 
 	// Alice tries to asynchronously respond to Bob, but fails because the nodes are unannounced and
 	// disconnected. Thus, a reply path could no be created for the response.
@@ -681,12 +681,12 @@ fn test_blinded_path_padding_for_full_length_path() {
 	// the hop sizes vary before padding.
 	let context = MessageContext::Custom(vec![0u8; 42]);
 	let entropy = &*nodes[3].entropy_source;
-	let receive_key = nodes[3].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[3].messenger.node_signer;
 	let blinded_path = BlindedMessagePath::new_with_dummy_hops(
 		&intermediate_nodes,
 		nodes[3].node_id,
 		TEST_DUMMY_HOP_COUNT,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,
@@ -717,12 +717,12 @@ fn test_blinded_path_no_padding_for_compact_path() {
 	// the hop sizes vary before padding.
 	let context = MessageContext::Custom(vec![0u8; 42]);
 	let entropy = &*nodes[3].entropy_source;
-	let receive_key = nodes[3].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[3].messenger.node_signer;
 	let blinded_path = BlindedMessagePath::new_with_dummy_hops(
 		&intermediate_nodes,
 		nodes[3].node_id,
 		TEST_DUMMY_HOP_COUNT,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,
@@ -745,11 +745,11 @@ fn we_are_intro_node() {
 	];
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[2].entropy_source;
-	let receive_key = nodes[2].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[2].messenger.node_signer;
 	let blinded_path = BlindedMessagePath::new(
 		&intermediate_nodes,
 		nodes[2].node_id,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,
@@ -766,11 +766,11 @@ fn we_are_intro_node() {
 		[MessageForwardNode { node_id: nodes[0].node_id, short_channel_id: None }];
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[1].entropy_source;
-	let receive_key = nodes[1].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[1].messenger.node_signer;
 	let blinded_path = BlindedMessagePath::new(
 		&intermediate_nodes,
 		nodes[1].node_id,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,
@@ -795,11 +795,11 @@ fn invalid_blinded_path_error() {
 		[MessageForwardNode { node_id: nodes[1].node_id, short_channel_id: None }];
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[2].entropy_source;
-	let receive_key = nodes[2].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[2].messenger.node_signer;
 	let mut blinded_path = BlindedMessagePath::new(
 		&intermediate_nodes,
 		nodes[2].node_id,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,
@@ -830,11 +830,11 @@ fn reply_path() {
 	];
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[0].entropy_source;
-	let receive_key = nodes[0].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[0].messenger.node_signer;
 	let reply_path = BlindedMessagePath::new(
 		&intermediate_nodes,
 		nodes[0].node_id,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,
@@ -857,11 +857,11 @@ fn reply_path() {
 	];
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[3].entropy_source;
-	let receive_key = nodes[3].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[3].messenger.node_signer;
 	let blinded_path = BlindedMessagePath::new(
 		&intermediate_nodes,
 		nodes[3].node_id,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,
@@ -873,11 +873,11 @@ fn reply_path() {
 	];
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[0].entropy_source;
-	let receive_key = nodes[0].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[0].messenger.node_signer;
 	let reply_path = BlindedMessagePath::new(
 		&intermediate_nodes,
 		nodes[0].node_id,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,
@@ -977,11 +977,11 @@ fn requests_peer_connection_for_buffered_messages() {
 		[MessageForwardNode { node_id: nodes[1].node_id, short_channel_id: None }];
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[0].entropy_source;
-	let receive_key = nodes[0].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[0].messenger.node_signer;
 	let blinded_path = BlindedMessagePath::new(
 		&intermediate_nodes,
 		nodes[2].node_id,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,
@@ -1048,11 +1048,11 @@ fn drops_buffered_messages_waiting_for_peer_connection() {
 		[MessageForwardNode { node_id: nodes[1].node_id, short_channel_id: None }];
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[0].entropy_source;
-	let receive_key = nodes[0].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[0].messenger.node_signer;
 	let blinded_path = BlindedMessagePath::new(
 		&intermediate_nodes,
 		nodes[2].node_id,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,
@@ -1112,11 +1112,11 @@ fn intercept_offline_peer_oms() {
 		[MessageForwardNode { node_id: nodes[1].node_id, short_channel_id: None }];
 	let context = MessageContext::Custom(Vec::new());
 	let entropy = &*nodes[2].entropy_source;
-	let receive_key = nodes[2].messenger.node_signer.get_receive_auth_key();
+	let node_signer = &nodes[2].messenger.node_signer;
 	let blinded_path = BlindedMessagePath::new(
 		&intermediate_nodes,
 		nodes[2].node_id,
-		receive_key,
+		node_signer,
 		context,
 		entropy,
 		&secp_ctx,

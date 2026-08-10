@@ -952,7 +952,7 @@ impl Writeable for ChannelUpdateInfo {
 			(8, Some(self.htlc_maximum_msat), required),
 			(10, self.fees, required),
 			(12, self.last_update_message, required),
-			(14, self.htlc_maximum_rgb, required),
+			(14, (self.htlc_maximum_rgb != 0).then_some(self.htlc_maximum_rgb), option),
 		});
 		Ok(())
 	}
@@ -967,7 +967,7 @@ impl Readable for ChannelUpdateInfo {
 		_init_tlv_field_var!(htlc_maximum_msat, option);
 		_init_tlv_field_var!(fees, required);
 		_init_tlv_field_var!(last_update_message, required);
-		_init_tlv_field_var!(htlc_maximum_rgb, required);
+		_init_tlv_field_var!(htlc_maximum_rgb, option);
 
 		read_tlv_fields!(reader, {
 			(0, last_update, required),
@@ -977,7 +977,7 @@ impl Readable for ChannelUpdateInfo {
 			(8, htlc_maximum_msat, required),
 			(10, fees, required),
 			(12, last_update_message, required),
-			(14, htlc_maximum_rgb, required)
+			(14, htlc_maximum_rgb, option)
 		});
 
 		if let Some(htlc_maximum_msat) = htlc_maximum_msat {
@@ -989,7 +989,7 @@ impl Readable for ChannelUpdateInfo {
 				htlc_maximum_msat,
 				fees: _init_tlv_based_struct_field!(fees, required),
 				last_update_message: _init_tlv_based_struct_field!(last_update_message, required),
-				htlc_maximum_rgb: _init_tlv_based_struct_field!(htlc_maximum_rgb, required),
+				htlc_maximum_rgb: htlc_maximum_rgb.unwrap_or(0),
 			})
 		} else {
 			Err(DecodeError::InvalidValue)
@@ -2746,7 +2746,6 @@ impl ReadOnlyNetworkGraph<'_> {
 	}
 }
 
-/*
 #[cfg(test)]
 pub(crate) mod tests {
 	use crate::ln::chan_utils::make_funding_redeemscript;
@@ -2855,6 +2854,7 @@ pub(crate) mod tests {
 		let node_2_btckey = &SecretKey::from_slice(&[39; 32]).unwrap();
 
 		let mut unsigned_announcement = UnsignedChannelAnnouncement {
+			contract_id: None,
 			features: channelmanager::provided_channel_features(&UserConfig::default()),
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 0,
@@ -2895,6 +2895,7 @@ pub(crate) mod tests {
 		f: F, node_key: &SecretKey, secp_ctx: &Secp256k1<secp256k1::All>,
 	) -> ChannelUpdate {
 		let mut unsigned_channel_update = UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 0,
 			timestamp: 100,
@@ -4233,6 +4234,7 @@ pub(crate) mod tests {
 
 		// 1. Test encoding/decoding of ChannelUpdateInfo
 		let chan_update_info = ChannelUpdateInfo {
+			htlc_maximum_rgb: 0,
 			last_update: 23,
 			enabled: true,
 			cltv_expiry_delta: 42,
@@ -4271,6 +4273,7 @@ pub(crate) mod tests {
 		// 2. Test encoding/decoding of ChannelInfo
 		// Check we can encode/decode ChannelInfo without ChannelUpdateInfo fields present.
 		let chan_info_none_updates = ChannelInfo {
+			contract_id: None,
 			features: channelmanager::provided_channel_features(&config),
 			node_one: NodeId::from_pubkey(&nodes[0].node.get_our_node_id()),
 			one_to_two: None,
@@ -4292,6 +4295,7 @@ pub(crate) mod tests {
 
 		// Check we can encode/decode ChannelInfo with ChannelUpdateInfo fields present.
 		let chan_info_some_updates = ChannelInfo {
+			contract_id: None,
 			features: channelmanager::provided_channel_features(&config),
 			node_one: NodeId::from_pubkey(&nodes[0].node.get_our_node_id()),
 			one_to_two: Some(chan_update_info.clone()),
@@ -4536,4 +4540,3 @@ pub mod benches {
 		bench.bench_function("write_network_graph", |b| b.iter(|| black_box(&net_graph).encode()));
 	}
 }
-*/

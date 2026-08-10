@@ -23,7 +23,7 @@ use crate::events::{Event, HTLCHandlingFailureType, PaymentFailureReason};
 use crate::ln::types::ChannelId;
 use crate::types::payment::{PaymentHash, PaymentSecret};
 use crate::ln::channelmanager;
-use crate::ln::channelmanager::{HTLCFailureMsg, PaymentId, RecipientOnionFields};
+use crate::ln::channelmanager::{HTLCFailureMsg, NextHopForward, PaymentId, RecipientOnionFields};
 use crate::types::features::{BlindedHopFeatures, ChannelFeatures, NodeFeatures};
 use crate::ln::functional_test_utils::*;
 use crate::ln::inbound_payment::ExpandedKey;
@@ -103,7 +103,7 @@ pub fn get_blinded_route_parameters(
 	node_ids: Vec<PublicKey>, channel_upds: &[&msgs::UnsignedChannelUpdate],
 	keys_manager: &test_utils::TestKeysInterface
 ) -> RouteParameters {
-	RouteParameters::from_payment_params_and_value(
+	RouteParameters::from_payment_params_and_value_without_rgb(
 		PaymentParameters::blinded(vec![
 			blinded_payment_path(
 				payment_secret, intro_node_min_htlc, intro_node_max_htlc, node_ids, channel_upds,
@@ -181,7 +181,7 @@ fn do_one_hop_blinded_path(success: bool) {
 		&chanmon_cfgs[1].keys_manager, &secp_ctx
 	).unwrap();
 
-	let route_params = RouteParameters::from_payment_params_and_value(
+	let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 		PaymentParameters::blinded(vec![blinded_path]),
 		amt_msat,
 	);
@@ -235,7 +235,7 @@ fn mpp_to_one_hop_blinded_path() {
 
 	let bolt12_features =
 		channelmanager::provided_bolt12_invoice_features(&UserConfig::default());
-	let route_params = RouteParameters::from_payment_params_and_value(
+	let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 		PaymentParameters::blinded(vec![blinded_path]).with_bolt12_features(bolt12_features).unwrap(),
 		amt_msat,
 	);
@@ -327,7 +327,7 @@ fn mpp_to_three_hop_blinded_paths() {
 		)
 			.with_bolt12_features(channelmanager::provided_bolt12_invoice_features(&UserConfig::default()))
 			.unwrap();
-		RouteParameters::from_payment_params_and_value(pay_params, amt_msat)
+		RouteParameters::from_payment_params_and_value_without_rgb(pay_params, amt_msat)
 	};
 
 	nodes[0].node.send_payment(payment_hash, RecipientOnionFields::spontaneous_empty(),
@@ -749,7 +749,9 @@ fn do_blinded_intercept_payment(intercept_node_fails: bool) {
 		return
 	}
 
-	nodes[1].node.forward_intercepted_htlc(intercept_id, &channel_id, nodes[2].node.get_our_node_id(), expected_outbound_amount_msat).unwrap();
+	nodes[1].node.forward_intercepted_htlc(intercept_id,
+		NextHopForward::ChannelId(nodes[2].node.get_our_node_id(), &channel_id),
+		nodes[2].node.get_our_node_id(), expected_outbound_amount_msat, None).unwrap();
 	expect_and_process_pending_htlcs(&nodes[1], false);
 
 	let payment_event = {
@@ -1126,7 +1128,7 @@ fn blinded_path_retries() {
 		)
 			.with_bolt12_features(channelmanager::provided_bolt12_invoice_features(&UserConfig::default()))
 			.unwrap();
-		RouteParameters::from_payment_params_and_value(pay_params, amt_msat)
+		RouteParameters::from_payment_params_and_value_without_rgb(pay_params, amt_msat)
 	};
 
 	nodes[0].node.send_payment(payment_hash, RecipientOnionFields::spontaneous_empty(), PaymentId(payment_hash.0), route_params.clone(), Retry::Attempts(2)).unwrap();
@@ -1344,7 +1346,7 @@ fn custom_tlvs_to_blinded_path() {
 		&chanmon_cfgs[1].keys_manager, &secp_ctx
 	).unwrap();
 
-	let route_params = RouteParameters::from_payment_params_and_value(
+	let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 		PaymentParameters::blinded(vec![blinded_path]),
 		amt_msat,
 	);
@@ -1399,7 +1401,7 @@ fn fails_receive_tlvs_authentication() {
 		&chanmon_cfgs[1].keys_manager, &secp_ctx
 	).unwrap();
 
-	let route_params = RouteParameters::from_payment_params_and_value(
+	let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 		PaymentParameters::blinded(vec![blinded_path]),
 		amt_msat,
 	);
@@ -1430,7 +1432,7 @@ fn fails_receive_tlvs_authentication() {
 		&chanmon_cfgs[1].keys_manager, &secp_ctx
 	).unwrap();
 
-	let route_params = RouteParameters::from_payment_params_and_value(
+	let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 		PaymentParameters::blinded(vec![blinded_path]),
 		amt_msat,
 	);
@@ -1489,7 +1491,7 @@ fn blinded_payment_path_padding() {
 
 	assert!(is_padded(&blinded_path.blinded_hops(), PAYMENT_PADDING_ROUND_OFF));
 
-	let route_params = RouteParameters::from_payment_params_and_value(PaymentParameters::blinded(vec![blinded_path]), amt_msat);
+	let route_params = RouteParameters::from_payment_params_and_value_without_rgb(PaymentParameters::blinded(vec![blinded_path]), amt_msat);
 
 	nodes[0].node.send_payment(payment_hash, RecipientOnionFields::spontaneous_empty(), PaymentId(payment_hash.0), route_params, Retry::Attempts(0)).unwrap();
 	check_added_monitors(&nodes[0], 1);
@@ -1514,6 +1516,7 @@ fn update_add_msg(
 	onion_routing_packet: msgs::OnionPacket
 ) -> msgs::UpdateAddHTLC {
 	msgs::UpdateAddHTLC {
+		rgb_payment: None,
 		channel_id: ChannelId::from_bytes([0; 32]),
 		htlc_id: 0,
 		amount_msat,
@@ -1548,8 +1551,8 @@ fn route_blinding_spec_test_vector() {
 	assert_eq!(blinding_override, pubkey_from_hex("031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f"));
 	// Can't use the public API here as the encrypted payloads contain unknown TLVs.
 	let path = [
-		((dave_node_id, None), WithoutLength(&dave_unblinded_tlvs)),
-		((eve_node_id, None), WithoutLength(&eve_unblinded_tlvs)),
+		(dave_node_id, WithoutLength(&dave_unblinded_tlvs)),
+		(eve_node_id, WithoutLength(&eve_unblinded_tlvs)),
 	];
 	let mut dave_eve_blinded_hops = blinded_path::utils::construct_blinded_hops(
 		&secp_ctx, path.into_iter(), &dave_eve_session_priv,
@@ -1559,8 +1562,8 @@ fn route_blinding_spec_test_vector() {
 	let bob_carol_session_priv = secret_from_hex("0202020202020202020202020202020202020202020202020202020202020202");
 	let bob_blinding_point = PublicKey::from_secret_key(&secp_ctx, &bob_carol_session_priv);
 	let path = [
-		((bob_node_id, None), WithoutLength(&bob_unblinded_tlvs)),
-		((carol_node_id, None), WithoutLength(&carol_unblinded_tlvs)),
+		(bob_node_id, WithoutLength(&bob_unblinded_tlvs)),
+		(carol_node_id, WithoutLength(&carol_unblinded_tlvs)),
 	];
 	let bob_carol_blinded_hops = blinded_path::utils::construct_blinded_hops(
 		&secp_ctx, path.into_iter(), &bob_carol_session_priv,
@@ -1591,6 +1594,8 @@ fn route_blinding_spec_test_vector() {
 	let session_priv = secret_from_hex("0303030303030303030303030303030303030303030303030303030303030303");
 	let path = Path {
 		hops: vec![RouteHop {
+			payment_amount: 0,
+			rgb_payment: None,
 			pubkey: bob_node_id,
 			node_features: NodeFeatures::empty(),
 			short_channel_id: 42,
@@ -1608,7 +1613,7 @@ fn route_blinding_spec_test_vector() {
 		}),
 	};
 	let cur_height = 747_000;
-	let (bob_onion, _, _) = onion_utils::create_payment_onion(&secp_ctx, &path, &session_priv, amt_msat, &RecipientOnionFields::spontaneous_empty(), cur_height, &PaymentHash([0; 32]), &None, None, [0; 32]).unwrap();
+	let (bob_onion, _, _, _) = onion_utils::create_payment_onion(&secp_ctx, &path, &session_priv, amt_msat, &RecipientOnionFields::spontaneous_empty(), cur_height, &PaymentHash([0; 32]), &None, None, [0; 32]).unwrap();
 
 	struct TestEcdhSigner {
 		node_secret: SecretKey,
@@ -1652,7 +1657,7 @@ fn route_blinding_spec_test_vector() {
 		};
 	let (carol_packet_bytes, carol_hmac) = if let onion_utils::Hop::BlindedForward {
 		next_hop_data: msgs::InboundOnionBlindedForwardPayload {
-			short_channel_id, payment_relay, payment_constraints, features, intro_node_blinding_point, next_blinding_override
+			short_channel_id, payment_relay, payment_constraints, features, intro_node_blinding_point, next_blinding_override, ..
 		}, next_hop_hmac, new_packet_bytes, ..
 	} = bob_peeled_onion {
 		assert_eq!(short_channel_id, 1729);
@@ -1686,7 +1691,7 @@ fn route_blinding_spec_test_vector() {
 		};
 	let (dave_packet_bytes, dave_hmac) = if let onion_utils::Hop::BlindedForward {
 		next_hop_data: msgs::InboundOnionBlindedForwardPayload {
-			short_channel_id, payment_relay, payment_constraints, features, intro_node_blinding_point, next_blinding_override
+			short_channel_id, payment_relay, payment_constraints, features, intro_node_blinding_point, next_blinding_override, ..
 		}, next_hop_hmac, new_packet_bytes, ..
 	} = carol_peeled_onion {
 		assert_eq!(short_channel_id, 1105);
@@ -1720,7 +1725,7 @@ fn route_blinding_spec_test_vector() {
 		};
 	let (eve_packet_bytes, eve_hmac) = if let onion_utils::Hop::BlindedForward {
 		next_hop_data: msgs::InboundOnionBlindedForwardPayload {
-			short_channel_id, payment_relay, payment_constraints, features, intro_node_blinding_point, next_blinding_override
+			short_channel_id, payment_relay, payment_constraints, features, intro_node_blinding_point, next_blinding_override, ..
 		}, next_hop_hmac, new_packet_bytes, ..
 	} = dave_peeled_onion {
 		assert_eq!(short_channel_id, 561);
@@ -1767,6 +1772,8 @@ fn test_combined_trampoline_onion_creation_vectors() {
 		hops: vec![
 			// Bob
 			RouteHop {
+				payment_amount: 0,
+				rgb_payment: None,
 				pubkey: pubkey_from_hex("0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c"),
 				node_features: NodeFeatures::empty(),
 				short_channel_id: 0,
@@ -1778,6 +1785,8 @@ fn test_combined_trampoline_onion_creation_vectors() {
 
 			// Carol
 			RouteHop {
+				payment_amount: 0,
+				rgb_payment: None,
 				pubkey: pubkey_from_hex("027f31ebc5462c1fdce1b737ecff52d37d75dea43ce11c74d25aa297165faa2007"),
 				node_features: NodeFeatures::empty(),
 				short_channel_id: (572330 << 40) + (42 << 16) + 2821,
@@ -1831,7 +1840,7 @@ fn test_combined_trampoline_onion_creation_vectors() {
 	let amt_msat = 150_000_000;
 	let cur_height = 800_000;
 	let recipient_onion_fields = RecipientOnionFields::secret_only(payment_secret);
-	let (bob_onion, htlc_msat, htlc_cltv) = onion_utils::create_payment_onion_internal(&secp_ctx, &path, &session_priv, amt_msat, &recipient_onion_fields, cur_height, &associated_data, &None, None, [0; 32], Some(outer_session_key), Some(outer_onion_prng_seed)).unwrap();
+	let (bob_onion, htlc_msat, htlc_cltv, _) = onion_utils::create_payment_onion_internal(&secp_ctx, &path, &session_priv, amt_msat, &recipient_onion_fields, cur_height, &associated_data, &None, None, [0; 32], Some(outer_session_key), Some(outer_onion_prng_seed)).unwrap();
 
 	let outer_onion_packet_hex = bob_onion.encode().to_lower_hex_string();
 	assert_eq!(outer_onion_packet_hex, "00025fd60556c134ae97e4baedba220a644037754ee67c54fd05e93bf40c17cbb73362fb9dee96001ff229945595b6edb59437a6bc143406d3f90f749892a84d8d430c6890437d26d5bfc599d565316ef51347521075bbab87c59c57bcf20af7e63d7192b46cf171e4f73cb11f9f603915389105d91ad630224bea95d735e3988add1e24b5bf28f1d7128db64284d90a839ba340d088c74b1fb1bd21136b1809428ec5399c8649e9bdf92d2dcfc694deae5046fa5b2bdf646847aaad73f5e95275763091c90e71031cae1f9a770fdea559642c9c02f424a2a28163dd0957e3874bd28a97bec67d18c0321b0e68bc804aa8345b17cb626e2348ca06c8312a167c989521056b0f25c55559d446507d6c491d50605cb79fa87929ce64b0a9860926eeaec2c431d926a1cadb9a1186e4061cb01671a122fc1f57602cbef06d6c194ec4b715c2e3dd4120baca3172cd81900b49fef857fb6d6afd24c983b608108b0a5ac0c1c6c52011f23b8778059ffadd1bb7cd06e2525417365f485a7fd1d4a9ba3818ede7cdc9e71afee8532252d08e2531ca52538655b7e8d912f7ec6d37bbcce8d7ec690709dbf9321e92c565b78e7fe2c22edf23e0902153d1ca15a112ad32fb19695ec65ce11ddf670da7915f05ad4b86c154fb908cb567315d1124f303f75fa075ebde8ef7bb12e27737ad9e4924439097338ea6d7a6fc3721b88c9b830a34e8d55f4c582b74a3895cc848fe57f4fe29f115dabeb6b3175be15d94408ed6771109cfaf57067ae658201082eae7605d26b1449af4425ae8e8f58cdda5c6265f1fd7a386fc6cea3074e4f25b909b96175883676f7610a00fdf34df9eb6c7b9a4ae89b839c69fd1f285e38cdceb634d782cc6d81179759bc9fd47d7fd060470d0b048287764c6837963274e708314f017ac7dc26d0554d59bfcfd3136225798f65f0b0fea337c6b256ebbb63a90b994c0ab93fd8b1d6bd4c74aebe535d6110014cd3d525394027dfe8faa98b4e9b2bee7949eb1961f1b026791092f84deea63afab66603dbe9b6365a102a1fef2f6b9744bc1bb091a8da9130d34d4d39f25dbad191649cfb67e10246364b7ce0c6ec072f9690cabb459d9fda0c849e17535de4357e9907270c75953fca3c845bb613926ecf73205219c7057a4b6bb244c184362bb4e2f24279dc4e60b94a5b1ec11c34081a628428ba5646c995b9558821053ba9c84a05afbf00dabd60223723096516d2f5668f3ec7e11612b01eb7a3a0506189a2272b88e89807943adb34291a17f6cb5516ffd6f945a1c42a524b21f096d66f350b1dad4db455741ae3d0e023309fbda5ef55fb0dc74f3297041448b2be76c525141963934c6afc53d263fb7836626df502d7c2ee9e79cbbd87afd84bbb8dfbf45248af3cd61ad5fac827e7683ca4f91dfad507a8eb9c17b2c9ac5ec051fe645a4a6cb37136f6f19b611e0ea8da7960af2d779507e55f57305bc74b7568928c5dd5132990fe54c22117df91c257d8c7b61935a018a28c1c3b17bab8e4294fa699161ec21123c9fc4e71079df31f300c2822e1246561e04765d3aab333eafd026c7431ac7616debb0e022746f4538e1c6348b600c988eeb2d051fc60c468dca260a84c79ab3ab8342dc345a764672848ea234e17332bc124799daf7c5fcb2e2358514a7461357e1c19c802c5ee32deccf1776885dd825bedd5f781d459984370a6b7ae885d4483a76ddb19b30f47ed47cd56aa5a079a89793dbcad461c59f2e002067ac98dd5a534e525c9c46c2af730741bf1f8629357ec0bfc0bc9ecb31af96777e507648ff4260dc3673716e098d9111dfd245f1d7c55a6de340deb8bd7a053e5d62d760f184dc70ca8fa255b9023b9b9aedfb6e419a5b5951ba0f83b603793830ee68d442d7b88ee1bbf6bbd1bcd6f68cc1af");
@@ -1861,6 +1870,8 @@ fn test_trampoline_inbound_payment_decoding() {
 		hops: vec![
 			// Bob
 			RouteHop {
+				payment_amount: 0,
+				rgb_payment: None,
 				pubkey: bob_node_id,
 				node_features: NodeFeatures::empty(),
 				short_channel_id: 0,
@@ -1872,6 +1883,8 @@ fn test_trampoline_inbound_payment_decoding() {
 
 			// Carol
 			RouteHop {
+				payment_amount: 0,
+				rgb_payment: None,
 				pubkey: carol_node_id,
 				node_features: NodeFeatures::empty(),
 				short_channel_id: (572330 << 40) + (42 << 16) + 2821,
@@ -1921,7 +1934,7 @@ fn test_trampoline_inbound_payment_decoding() {
 	let amt_msat = 150_000_001;
 	let cur_height = 800_001;
 	let recipient_onion_fields = RecipientOnionFields::secret_only(payment_secret);
-	let (bob_onion, _, _) = onion_utils::create_payment_onion(&secp_ctx, &path, &session_priv, amt_msat, &recipient_onion_fields, cur_height, &PaymentHash([0; 32]), &None, None, [0; 32]).unwrap();
+	let (bob_onion, _, _, _) = onion_utils::create_payment_onion(&secp_ctx, &path, &session_priv, amt_msat, &recipient_onion_fields, cur_height, &PaymentHash([0; 32]), &None, None, [0; 32]).unwrap();
 
 	struct TestEcdhSigner {
 		node_secret: SecretKey,
@@ -2028,7 +2041,7 @@ fn do_test_trampoline_single_hop_receive(success: bool) {
 		let payee_tlvs = payee_tlvs.authenticate(nonce, &expanded_key);
 		let carol_unblinded_tlvs = payee_tlvs.encode();
 
-		let path = [((carol_node_id, None), WithoutLength(&carol_unblinded_tlvs))];
+		let path = [(carol_node_id, WithoutLength(&carol_unblinded_tlvs))];
 		blinded_path::utils::construct_blinded_hops(
 			&secp_ctx, path.into_iter(), &carol_alice_trampoline_session_priv,
 		)
@@ -2049,7 +2062,7 @@ fn do_test_trampoline_single_hop_receive(success: bool) {
 		};
 
 		let carol_unblinded_tlvs = payee_tlvs.encode();
-		let path = [((carol_node_id, None), WithoutLength(&carol_unblinded_tlvs))];
+		let path = [(carol_node_id, WithoutLength(&carol_unblinded_tlvs))];
 		blinded_path::utils::construct_blinded_hops(
 			&secp_ctx, path.into_iter(), &carol_alice_trampoline_session_priv,
 		)
@@ -2060,6 +2073,8 @@ fn do_test_trampoline_single_hop_receive(success: bool) {
 			hops: vec![
 				// Bob
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: bob_node_id,
 					node_features: NodeFeatures::empty(),
 					short_channel_id: alice_bob_scid,
@@ -2071,6 +2086,8 @@ fn do_test_trampoline_single_hop_receive(success: bool) {
 
 				// Carol
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: carol_node_id,
 					node_features: NodeFeatures::empty(),
 					short_channel_id: bob_carol_scid,
@@ -2143,7 +2160,7 @@ fn do_test_trampoline_single_hop_receive(success: bool) {
 				SecretKey::from_slice(&session_priv_hash[..]).expect("You broke SHA-256!")
 			};
 
-			let (outer_payloads, _, _) = onion_utils::build_onion_payloads(&route.paths[0], outer_total_msat, &recipient_onion_fields, outer_starting_htlc_offset, &None, None, Some(trampoline_packet)).unwrap();
+			let (outer_payloads, _, _, _) = onion_utils::build_onion_payloads(&route.paths[0], outer_total_msat, &recipient_onion_fields, outer_starting_htlc_offset, &None, None, Some(trampoline_packet)).unwrap();
 			let outer_onion_keys = onion_utils::construct_onion_keys(&secp_ctx, &route.clone().paths[0], &outer_session_priv);
 			let outer_packet = onion_utils::construct_onion_packet(
 				outer_payloads,
@@ -2251,7 +2268,7 @@ fn test_trampoline_unblinded_receive() {
 	};
 
 	let carol_unblinded_tlvs = payee_tlvs.encode();
-	let path = [((carol_node_id, None), WithoutLength(&carol_unblinded_tlvs))];
+	let path = [(carol_node_id, WithoutLength(&carol_unblinded_tlvs))];
 	let carol_alice_trampoline_session_priv = secret_from_hex("a0f4b8d7b6c2d0ffdfaf718f76e9decaef4d9fb38a8c4addb95c4007cc3eee03");
 	let carol_blinding_point = PublicKey::from_secret_key(&secp_ctx, &carol_alice_trampoline_session_priv);
 	let carol_blinded_hops = blinded_path::utils::construct_blinded_hops(
@@ -2263,6 +2280,8 @@ fn test_trampoline_unblinded_receive() {
 			hops: vec![
 				// Bob
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: bob_node_id,
 					node_features: NodeFeatures::empty(),
 					short_channel_id: alice_bob_scid,
@@ -2274,6 +2293,8 @@ fn test_trampoline_unblinded_receive() {
 
 				// Carol
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: carol_node_id,
 					node_features: NodeFeatures::empty(),
 					short_channel_id: bob_carol_scid,
@@ -2339,7 +2360,7 @@ fn test_trampoline_unblinded_receive() {
 		// this and won't be able to decode the fulfill hold times.
 		let outer_session_priv = secret_from_hex("e52c20461ed7acd46c4e7b591a37610519179482887bd73bf3b94617f8f03677");
 
-		let (outer_payloads, _, _) = onion_utils::build_onion_payloads(&route.paths[0], outer_total_msat, &recipient_onion_fields, outer_starting_htlc_offset, &None, None, Some(trampoline_packet)).unwrap();
+		let (outer_payloads, _, _, _) = onion_utils::build_onion_payloads(&route.paths[0], outer_total_msat, &recipient_onion_fields, outer_starting_htlc_offset, &None, None, Some(trampoline_packet)).unwrap();
 		let outer_onion_keys = onion_utils::construct_onion_keys(&secp_ctx, &route.clone().paths[0], &outer_session_priv);
 		let outer_packet = onion_utils::construct_onion_packet(
 			outer_payloads,
@@ -2406,6 +2427,8 @@ fn test_trampoline_forward_rejection() {
 			hops: vec![
 				// Bob
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: bob_node_id,
 					node_features: NodeFeatures::empty(),
 					short_channel_id: alice_bob_scid,
@@ -2417,6 +2440,8 @@ fn test_trampoline_forward_rejection() {
 
 				// Carol
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: carol_node_id,
 					node_features: NodeFeatures::empty(),
 					short_channel_id: bob_carol_scid,

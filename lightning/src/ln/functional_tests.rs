@@ -11,7 +11,6 @@
 //! payments/messages between them, and often checking the resulting ChannelMonitors are able to
 //! claim outputs on-chain.
 
-/*
 use crate::chain;
 use crate::chain::chaininterface::LowerBoundedFeeEstimator;
 use crate::chain::channelmonitor;
@@ -125,6 +124,8 @@ pub fn fake_network_test() {
 	// Do some rebalance loop payments, simultaneously
 	let mut hops = vec![
 		RouteHop {
+			payment_amount: 0,
+			rgb_payment: None,
 			pubkey: node_c_id,
 			node_features: NodeFeatures::empty(),
 			short_channel_id: chan_2.0.contents.short_channel_id,
@@ -134,6 +135,8 @@ pub fn fake_network_test() {
 			maybe_announced_channel: true,
 		},
 		RouteHop {
+			payment_amount: 0,
+			rgb_payment: None,
 			pubkey: node_d_id,
 			node_features: NodeFeatures::empty(),
 			short_channel_id: chan_3.0.contents.short_channel_id,
@@ -143,6 +146,8 @@ pub fn fake_network_test() {
 			maybe_announced_channel: true,
 		},
 		RouteHop {
+			payment_amount: 0,
+			rgb_payment: None,
 			pubkey: node_b_id,
 			node_features: nodes[1].node.node_features(),
 			short_channel_id: chan_4.0.contents.short_channel_id,
@@ -159,7 +164,8 @@ pub fn fake_network_test() {
 	let payment_params = PaymentParameters::from_node_id(node_b_id, TEST_FINAL_CLTV)
 		.with_bolt11_features(nodes[1].node.bolt11_invoice_features())
 		.unwrap();
-	let route_params = RouteParameters::from_payment_params_and_value(payment_params, 1000000);
+	let route_params =
+		RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 1000000);
 	let route = Route {
 		paths: vec![Path { hops, blinded_tail: None }],
 		route_params: Some(route_params.clone()),
@@ -169,6 +175,8 @@ pub fn fake_network_test() {
 
 	let mut hops = vec![
 		RouteHop {
+			payment_amount: 0,
+			rgb_payment: None,
 			pubkey: node_d_id,
 			node_features: NodeFeatures::empty(),
 			short_channel_id: chan_4.0.contents.short_channel_id,
@@ -178,6 +186,8 @@ pub fn fake_network_test() {
 			maybe_announced_channel: true,
 		},
 		RouteHop {
+			payment_amount: 0,
+			rgb_payment: None,
 			pubkey: node_c_id,
 			node_features: NodeFeatures::empty(),
 			short_channel_id: chan_3.0.contents.short_channel_id,
@@ -187,6 +197,8 @@ pub fn fake_network_test() {
 			maybe_announced_channel: true,
 		},
 		RouteHop {
+			payment_amount: 0,
+			rgb_payment: None,
 			pubkey: node_b_id,
 			node_features: nodes[1].node.node_features(),
 			short_channel_id: chan_2.0.contents.short_channel_id,
@@ -832,7 +844,7 @@ pub fn test_justice_tx_htlc_timeout() {
 		revoked_local_txn[1].input[0].witness.last().unwrap().len(),
 		OFFERED_HTLC_SCRIPT_WEIGHT
 	); // HTLC-Timeout
-   // Revoke the old state
+	// Revoke the old state
 	claim_payment(&nodes[0], &[&nodes[1]], payment_preimage_3);
 
 	{
@@ -2243,7 +2255,7 @@ pub fn fail_backward_pending_htlc_upon_channel_failure() {
 		let session_priv = SecretKey::from_slice(&[42; 32]).unwrap();
 		let current_height = nodes[1].node.best_block.read().unwrap().height + 1;
 		let recipient_onion_fields = RecipientOnionFields::secret_only(payment_secret);
-		let (onion_payloads, _amount_msat, cltv_expiry) = onion_utils::build_onion_payloads(
+		let (onion_payloads, _amount_msat, cltv_expiry, _) = onion_utils::build_onion_payloads(
 			&route.paths[0],
 			50_000,
 			&recipient_onion_fields,
@@ -2261,6 +2273,7 @@ pub fn fail_backward_pending_htlc_upon_channel_failure() {
 
 		// Send a 0-msat update_add_htlc to fail the channel.
 		let update_add_htlc = msgs::UpdateAddHTLC {
+			rgb_payment: None,
 			channel_id: chan.2,
 			htlc_id: 0,
 			amount_msat: 0,
@@ -5919,7 +5932,8 @@ pub fn test_check_htlc_underpaying() {
 	let payment_params = PaymentParameters::from_node_id(node_b_id, TEST_FINAL_CLTV)
 		.with_bolt11_features(nodes[1].node.bolt11_invoice_features())
 		.unwrap();
-	let route_params = RouteParameters::from_payment_params_and_value(payment_params, 10_000);
+	let route_params =
+		RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 10_000);
 	let route = get_route(
 		&node_a_id,
 		&route_params,
@@ -6029,7 +6043,7 @@ pub fn test_announce_disable_channels() {
 		match e {
 			MessageSendEvent::BroadcastChannelUpdate { ref msg } => {
 				assert_eq!(msg.contents.channel_flags & (1 << 1), 1 << 1); // The "channel disabled" bit should be set
-														   // Check that each channel gets updated exactly once
+															   // Check that each channel gets updated exactly once
 				if chans_disabled
 					.insert(msg.contents.short_channel_id, msg.contents.timestamp)
 					.is_some()
@@ -6221,7 +6235,8 @@ pub fn test_bump_penalty_txn_on_revoked_htlcs() {
 		.unwrap();
 	let scorer = test_utils::TestScorer::new();
 	let random_seed_bytes = chanmon_cfgs[1].keys_manager.get_secure_random_bytes();
-	let route_params = RouteParameters::from_payment_params_and_value(payment_params, 3_000_000);
+	let route_params =
+		RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 3_000_000);
 	let route = get_route(
 		&node_a_id,
 		&route_params,
@@ -6237,7 +6252,8 @@ pub fn test_bump_penalty_txn_on_revoked_htlcs() {
 	let payment_params = PaymentParameters::from_node_id(node_a_id, 50)
 		.with_bolt11_features(nodes[0].node.bolt11_invoice_features())
 		.unwrap();
-	let route_params = RouteParameters::from_payment_params_and_value(payment_params, 3_000_000);
+	let route_params =
+		RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 3_000_000);
 	let route = get_route(
 		&node_b_id,
 		&route_params,
@@ -6907,7 +6923,7 @@ pub fn test_onion_value_mpp_set_calculation() {
 				&session_priv,
 			);
 			let recipient_onion_fields = RecipientOnionFields::secret_only(payment_secret);
-			let (mut onion_payloads, _, _) = onion_utils::build_onion_payloads(
+			let (mut onion_payloads, _, _, _) = onion_utils::build_onion_payloads(
 				&route.paths[0],
 				100_000,
 				&recipient_onion_fields,
@@ -10000,4 +10016,3 @@ pub fn test_dust_exposure_holding_cell_assertion() {
 	// Now that everything has settled, make sure the channels still work with a simple claim.
 	claim_payment(&nodes[2], &[&nodes[1]], payment_preimage_cb);
 }
-*/

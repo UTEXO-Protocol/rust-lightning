@@ -21,11 +21,13 @@ use rgb_lib::{
 	bitcoin::psbt::Psbt as RgbLibPsbt,
 	keys::WitnessVersion,
 	wallet::{
-		rust_only::{AssetColoringInfo, ColoringInfo},
+		rust_only::{
+			AssetColoringInfo, ColoringInfo, PreparedRgbTransferAcceptance, RgbAcceptanceResolution,
+		},
 		DatabaseType, OnlineOptions, SinglesigKeys, Wallet, WalletData,
 	},
 	AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
-	Fascia, FileContent, RgbTransfer, RgbTransport, WitnessOrd,
+	Fascia, FileContent, RgbTransport, WitnessOrd,
 };
 use serde::{Deserialize, Serialize};
 use strict_encoding::{StrictDeserialize, StrictSerialize};
@@ -63,6 +65,8 @@ pub const RGB_PRIMARY_NS: &str = "rgb";
 pub const RGB_CHANNEL_INFO_NS: &str = "channel_info";
 /// Secondary namespace for pending channel info
 pub const RGB_CHANNEL_INFO_PENDING_NS: &str = "channel_info_pending";
+/// Secondary namespace for durable inbound RGB funding acceptance state.
+pub const RGB_FUNDING_ACCEPTANCE_NS: &str = "funding_acceptance";
 /// Secondary namespace for inbound payment info
 pub const RGB_PAYMENT_INFO_INBOUND_NS: &str = "payment_info_inbound";
 /// Secondary namespace for outbound payment info
@@ -78,7 +82,7 @@ pub const RGB_WALLET_CONFIG_NS: &str = "wallet_config";
 const VANILLA_SYNC_LOOKBACK: u32 = 20;
 
 /// RGB channel info
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RgbInfo {
 	/// Channel contract ID
 	#[serde(with = "contract_id_serde")]
@@ -122,6 +126,121 @@ pub struct TransferInfo {
 	pub contract_id: ContractId,
 	/// Transfer RGB amount
 	pub rgb_amount: u64,
+}
+
+/// Durable phase of an inbound RGB channel funding acceptance.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+pub enum FundingAcceptanceStage {
+	/// The RGB consignment is being fetched and validated outside the peer mutex.
+	Validating,
+	/// The validated RGB result is durable in an isolated staging stock.
+	Prepared,
+	/// The staged stock is live but retains an exact rollback snapshot.
+	Promoted,
+	/// A rollback decision was persisted before restoring the prior stock.
+	RollingBack,
+	/// The initial channel monitor is durable and the RGB result is committed.
+	Finalized,
+	/// Acceptance failed and the funding handshake must be retried from a fresh channel.
+	RetryRequired,
+	/// The initial monitor is durable and the stock commit decision is being applied.
+	Finalizing,
+}
+
+/// Crash evidence for an inbound RGB funding operation.
+///
+/// LDK does not serialize pre-funded channels. A record found after restart is therefore
+/// intentionally treated as retry-required rather than as a resumable channel.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PendingFundingAcceptance {
+	/// Persistence schema version.
+	pub version: u8,
+	/// Temporary channel ID used as the durable record key.
+	pub temporary_channel_id: String,
+	/// Remote node participating in the funding handshake.
+	pub counterparty_node_id: String,
+	/// Proposed funding transaction ID.
+	pub funding_txid: String,
+	/// Funding output index in the proposed transaction.
+	pub funding_output_index: u16,
+	/// RGB consignment transport endpoint.
+	pub consignment_endpoint: String,
+	/// Asset amount pushed to the accepting node.
+	pub push_asset_amount: Option<u64>,
+	/// Current durable acceptance phase.
+	pub stage: FundingAcceptanceStage,
+	/// Validated transfer consignment, populated once preparation completes.
+	pub consignment: Option<Vec<u8>>,
+	/// Derived channel metadata, populated once preparation completes.
+	pub rgb_info: Option<RgbInfo>,
+}
+
+impl PendingFundingAcceptance {
+	const VERSION: u8 = 2;
+
+	/// Returns the stable persistence key.
+	pub fn key(&self) -> &str {
+		&self.temporary_channel_id
+	}
+
+	fn validate(&self) -> Result<(), io::Error> {
+		let is_fixed_hex = |value: &str, byte_len: usize| {
+			value.len() == byte_len * 2
+				&& value.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit())
+		};
+		if self.version != Self::VERSION
+			|| !is_fixed_hex(&self.temporary_channel_id, 32)
+			|| !is_fixed_hex(&self.counterparty_node_id, 33)
+			|| !is_fixed_hex(&self.funding_txid, 32)
+			|| self.consignment_endpoint.is_empty()
+		{
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidData,
+				"invalid RGB funding acceptance journal",
+			));
+		}
+		Ok(())
+	}
+}
+
+/// Atomically writes the current funding acceptance record.
+pub fn write_pending_funding_acceptance(
+	record: &PendingFundingAcceptance, kv_store: &dyn KVStoreSync,
+) -> Result<(), io::Error> {
+	record.validate()?;
+	let data =
+		bincode::serialize(record).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+	kv_store.write(RGB_PRIMARY_NS, RGB_FUNDING_ACCEPTANCE_NS, record.key(), data)
+}
+
+/// Reads a funding acceptance record by temporary channel ID.
+pub fn read_pending_funding_acceptance(
+	temporary_channel_id: &str, kv_store: &dyn KVStoreSync,
+) -> Result<PendingFundingAcceptance, io::Error> {
+	let data = kv_store.read(RGB_PRIMARY_NS, RGB_FUNDING_ACCEPTANCE_NS, temporary_channel_id)?;
+	let record: PendingFundingAcceptance =
+		bincode::deserialize(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+	record.validate()?;
+	if record.key() != temporary_channel_id {
+		return Err(io::Error::new(
+			io::ErrorKind::InvalidData,
+			"RGB funding acceptance journal key mismatch",
+		));
+	}
+	Ok(record)
+}
+
+/// Durably removes a completed funding acceptance record.
+pub fn remove_pending_funding_acceptance(
+	temporary_channel_id: &str, kv_store: &dyn KVStoreSync,
+) -> Result<(), io::Error> {
+	kv_store.remove(RGB_PRIMARY_NS, RGB_FUNDING_ACCEPTANCE_NS, temporary_channel_id, false)
+}
+
+/// A validated RGB funding acceptance whose live wallet state is still unchanged.
+pub(crate) struct PreparedFundingAcceptance {
+	prepared: PreparedRgbTransferAcceptance,
+	record: PendingFundingAcceptance,
 }
 
 mod contract_id_serde {
@@ -227,7 +346,9 @@ fn _get_wallet_data(
 	)
 }
 
-async fn _get_rgb_wallet(ldk_data_dir: &Path, kv_store: &dyn KVStoreSync) -> Wallet {
+async fn _get_rgb_wallet(
+	ldk_data_dir: &Path, kv_store: &dyn KVStoreSync,
+) -> Result<Wallet, ChannelError> {
 	let (
 		data_dir,
 		bitcoin_network,
@@ -247,14 +368,15 @@ async fn _get_rgb_wallet(ldk_data_dir: &Path, kv_store: &dyn KVStoreSync) -> Wal
 		)
 	})
 	.await
-	.unwrap()
+	.map_err(|error| {
+		ChannelError::close(format!("RGB wallet worker failed before completion: {error}"))
+	})
 }
 
-async fn _accept_transfer(
-	ldk_data_dir: &Path, funding_txid: String, consignment_endpoint: RgbTransport,
-	kv_store: &dyn KVStoreSync,
-) -> Result<(RgbTransfer, Vec<Assignment>), RgbLibError> {
-	let funding_vout = 1;
+async fn _prepare_transfer_acceptance(
+	operation_id: String, ldk_data_dir: &Path, funding_txid: String, funding_vout: u32,
+	consignment_endpoint: RgbTransport, kv_store: &dyn KVStoreSync,
+) -> Result<PreparedRgbTransferAcceptance, RgbLibError> {
 	let (
 		data_dir,
 		bitcoin_network,
@@ -278,15 +400,18 @@ async fn _accept_transfer(
 			skip_consistency_check: true,
 			vanilla_sync_lookback: VANILLA_SYNC_LOOKBACK,
 		})?;
-		wallet.accept_transfer(
-			funding_txid.clone(),
+		wallet.prepare_accept_transfer(
+			operation_id,
+			funding_txid,
 			funding_vout,
 			consignment_endpoint,
 			STATIC_BLINDING,
 		)
 	})
 	.await
-	.unwrap()
+	.map_err(|error| RgbLibError::Internal {
+		details: format!("RGB funding worker failed before completion: {error}"),
+	})?
 }
 
 fn _counterparty_output_index(
@@ -500,23 +625,39 @@ where
 		static_blinding: Some(STATIC_BLINDING),
 		nonce: None,
 	};
-	let psbt = Psbt::from_unsigned_tx(commitment_tx.clone()).unwrap();
-	let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
+	let operation_id = funding_scope
+		.get_funding_txo()
+		.ok_or_else(|| {
+			ChannelError::close("RGB commitment is missing its funding outpoint".to_owned())
+		})?
+		.txid
+		.to_string();
+	let mut psbt = RgbLibPsbt::from_unsigned_tx(commitment_tx.clone()).map_err(|error| {
+		ChannelError::close(format!("Failed to construct RGB commitment PSBT: {error}"))
+	})?;
 	let handle = Handle::current();
 	let _ = handle.enter();
-	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
-	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
-	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
+	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store))?;
+	let fascia = wallet
+		.color_psbt_and_consume_for_operation(
+			&operation_id,
+			&mut psbt,
+			coloring_info,
+			Some(WitnessOrd::Ignored),
+		)
+		.map_err(funding_acceptance_error)?;
 	let modified_tx = match psbt.extract_tx() {
 		Ok(tx) => tx,
 		Err(ExtractTxError::MissingInputValue { tx }) => tx,
-		Err(e) => panic!("should never happen: {e}"),
+		Err(error) => {
+			return Err(ChannelError::close(format!(
+				"Failed to extract colored RGB commitment transaction: {error}"
+			)))
+		},
 	};
 
 	let txid = modified_tx.compute_txid();
 	commitment_transaction.built = BuiltCommitmentTransaction { transaction: modified_tx, txid };
-
-	wallet.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored)).unwrap();
 
 	// Keep the latest fascia per commitment side so a wallet restored without
 	// an RGB backup can re-consume it and color force-close sweeps.
@@ -526,7 +667,6 @@ where
 	kv_store
 		.write(RGB_PRIMARY_NS, RGB_COMMITMENT_FASCIA_NS, &fascia_key, fascia_bytes)
 		.expect("KVStore write failed");
-
 	let rgb_amount = if counterparty {
 		vout_p2wpkh_amt + rgb_offered_htlc
 	} else {
@@ -567,7 +707,7 @@ pub(crate) fn color_htlc(
 	let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
 	let handle = Handle::current();
 	let _ = handle.enter();
-	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
+	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store))?;
 	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
 	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
 	let modified_tx = match psbt.extract_tx() {
@@ -629,7 +769,7 @@ pub(crate) fn color_closing(
 	let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
 	let handle = Handle::current();
 	let _ = handle.enter();
-	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
+	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store))?;
 	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
 	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
 	let modified_tx = match psbt.extract_tx() {
@@ -694,90 +834,508 @@ pub fn write_rgb_payment_info_file(
 /// Rename RGB channel info from temporary to final channel ID in KVStore
 pub(crate) fn rename_rgb_files(
 	channel_id: &ChannelId, temporary_channel_id: &ChannelId, kv_store: &dyn KVStoreSync,
-) {
+) -> Result<(), io::Error> {
 	let temp_chan_id = temporary_channel_id.0.as_hex().to_string();
 	let chan_id = channel_id.0.as_hex().to_string();
 
-	let rgb_info = kv_store.read_rgb_channel_info(&temp_chan_id, false).expect("rename ok");
-	kv_store.write_rgb_channel_info(&chan_id, &rgb_info, false);
-	kv_store.remove_rgb_channel_info(&temp_chan_id, false).expect("rename ok");
+	for namespace in [RGB_CHANNEL_INFO_NS, RGB_CHANNEL_INFO_PENDING_NS] {
+		match kv_store.read(RGB_PRIMARY_NS, namespace, &temp_chan_id) {
+			Ok(data) => {
+				bincode::deserialize::<RgbInfo>(&data)
+					.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+				match kv_store.read(RGB_PRIMARY_NS, namespace, &chan_id) {
+					Ok(existing) if existing != data => {
+						return Err(io::Error::new(
+							io::ErrorKind::InvalidData,
+							"final RGB channel metadata differs from temporary metadata",
+						));
+					},
+					Ok(_) => {},
+					Err(error) if error.kind() == io::ErrorKind::NotFound => {
+						kv_store.write(RGB_PRIMARY_NS, namespace, &chan_id, data)?;
+					},
+					Err(error) => return Err(error),
+				}
+				match kv_store.remove(RGB_PRIMARY_NS, namespace, &temp_chan_id, false) {
+					Ok(()) => {},
+					Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+					Err(error) => return Err(error),
+				}
+			},
+			Err(error) if error.kind() == io::ErrorKind::NotFound => {
+				let data = kv_store.read(RGB_PRIMARY_NS, namespace, &chan_id)?;
+				bincode::deserialize::<RgbInfo>(&data)
+					.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+			},
+			Err(error) => return Err(error),
+		}
+	}
 
-	let rgb_info = kv_store.read_rgb_channel_info(&temp_chan_id, true).expect("rename ok");
-	kv_store.write_rgb_channel_info(&chan_id, &rgb_info, true);
-	kv_store.remove_rgb_channel_info(&temp_chan_id, true).expect("rename ok");
+	match kv_store.read(RGB_PRIMARY_NS, RGB_CONSIGNMENT_NS, &temp_chan_id) {
+		Ok(data) => {
+			match kv_store.read(RGB_PRIMARY_NS, RGB_CONSIGNMENT_NS, &chan_id) {
+				Ok(existing) if existing != data => {
+					return Err(io::Error::new(
+						io::ErrorKind::InvalidData,
+						"final RGB consignment differs from temporary consignment",
+					));
+				},
+				Ok(_) => {},
+				Err(error) if error.kind() == io::ErrorKind::NotFound => {
+					kv_store.write(RGB_PRIMARY_NS, RGB_CONSIGNMENT_NS, &chan_id, data)?;
+				},
+				Err(error) => return Err(error),
+			}
+			match kv_store.remove(RGB_PRIMARY_NS, RGB_CONSIGNMENT_NS, &temp_chan_id, false) {
+				Ok(()) => {},
+				Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+				Err(error) => return Err(error),
+			}
+		},
+		Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+		Err(error) => return Err(error),
+	}
+	// The funding-acceptance journal intentionally remains keyed by the temporary channel ID.
+	// RLN removes it only after both the finalized RGB wallet and canonical channel metadata have
+	// been acknowledged by VSS. Deleting it here would make a crash between ChannelMonitor
+	// persistence and RLN event handling unrecoverable on a fresh device.
+	Ok(())
+}
 
-	if let Ok(consignment_data) = kv_store.read_rgb_consignment(&temp_chan_id) {
-		kv_store.write_rgb_consignment(&chan_id, consignment_data);
-		kv_store.remove_rgb_consignment(&temp_chan_id);
+fn funding_acceptance_error(error: RgbLibError) -> ChannelError {
+	match error {
+		RgbLibError::InvalidConsignment => {
+			ChannelError::close("Invalid RGB consignment for funding".to_owned())
+		},
+		RgbLibError::NoConsignment => {
+			ChannelError::close("Failed to find RGB consignment".to_owned())
+		},
+		RgbLibError::UnknownRgbSchema { schema_id } => {
+			ChannelError::close(format!("Unknown RGB schema: {schema_id}"))
+		},
+		RgbLibError::UnsupportedSchema { asset_schema } => {
+			ChannelError::close(format!("Unsupported RGB schema: {asset_schema}"))
+		},
+		RgbLibError::Indexer { details }
+		| RgbLibError::InvalidIndexer { details }
+		| RgbLibError::Network { details } => {
+			ChannelError::close(format!("Failed to connect to indexer: {details}"))
+		},
+		error => ChannelError::close(format!("Unexpected RGB funding error: {error}")),
 	}
 }
 
-/// Handle funding on the receiver side
-pub(crate) fn handle_funding(
-	temporary_channel_id: &ChannelId, funding_txid: String, ldk_data_dir: &Path,
-	consignment_endpoint: RgbTransport, push_asset_amount: Option<u64>, kv_store: &dyn KVStoreSync,
+fn funding_storage_error(context: &str, error: impl core::fmt::Display) -> ChannelError {
+	ChannelError::close(format!("{context}: {error}"))
+}
+
+fn persist_retry_required(
+	record: &mut PendingFundingAcceptance, kv_store: &dyn KVStoreSync, context: &str,
 ) -> Result<(), ChannelError> {
+	record.stage = FundingAcceptanceStage::RetryRequired;
+	// Retry evidence only needs the operation identity and handshake inputs. Retaining a complete
+	// validated consignment after rollback would grow storage with the asset's full history and keep
+	// data which no longer participates in recovery.
+	record.consignment = None;
+	record.rgb_info = None;
+	write_pending_funding_acceptance(record, kv_store)
+		.map_err(|error| funding_storage_error(context, error))
+}
+
+fn persist_prepared_funding_artifacts(
+	record: &PendingFundingAcceptance, kv_store: &dyn KVStoreSync,
+) -> Result<(), ChannelError> {
+	let consignment = record.consignment.as_ref().ok_or_else(|| {
+		ChannelError::close("Prepared RGB funding is missing its consignment".to_owned())
+	})?;
+	let rgb_info = record.rgb_info.as_ref().ok_or_else(|| {
+		ChannelError::close("Prepared RGB funding is missing channel metadata".to_owned())
+	})?;
+	let serialized_info = bincode::serialize(rgb_info).map_err(|error| {
+		funding_storage_error("Failed to serialize RGB channel metadata", error)
+	})?;
+	for namespace in [RGB_CHANNEL_INFO_PENDING_NS, RGB_CHANNEL_INFO_NS] {
+		kv_store
+			.write(RGB_PRIMARY_NS, namespace, &record.temporary_channel_id, serialized_info.clone())
+			.map_err(|error| {
+				funding_storage_error("Failed to stage RGB channel metadata", error)
+			})?;
+	}
+	for key in [&record.funding_txid, &record.temporary_channel_id] {
+		kv_store
+			.write(RGB_PRIMARY_NS, RGB_CONSIGNMENT_NS, key, consignment.clone())
+			.map_err(|error| funding_storage_error("Failed to stage RGB consignment", error))?;
+	}
+	Ok(())
+}
+
+fn remove_if_present(
+	kv_store: &dyn KVStoreSync, secondary_namespace: &str, key: &str,
+) -> Result<(), ChannelError> {
+	match kv_store.remove(RGB_PRIMARY_NS, secondary_namespace, key, false) {
+		Ok(()) => Ok(()),
+		Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+		Err(error) => Err(funding_storage_error("Failed to remove staged RGB funding data", error)),
+	}
+}
+
+fn clear_prepared_funding_artifacts(
+	record: &PendingFundingAcceptance, kv_store: &dyn KVStoreSync,
+) -> Result<(), ChannelError> {
+	for namespace in [RGB_CHANNEL_INFO_PENDING_NS, RGB_CHANNEL_INFO_NS] {
+		remove_if_present(kv_store, namespace, &record.temporary_channel_id)?;
+	}
+	for key in [&record.funding_txid, &record.temporary_channel_id] {
+		remove_if_present(kv_store, RGB_CONSIGNMENT_NS, key)?;
+	}
+	Ok(())
+}
+
+fn abort_prepared_with_record(
+	prepared: PreparedRgbTransferAcceptance, record: &mut PendingFundingAcceptance,
+	kv_store: &dyn KVStoreSync,
+) -> Result<(), ChannelError> {
+	record.stage = FundingAcceptanceStage::RollingBack;
+	write_pending_funding_acceptance(record, kv_store)
+		.map_err(|error| funding_storage_error("Failed to persist RGB rollback decision", error))?;
+	prepared.abort().map_err(funding_acceptance_error)?;
+	clear_prepared_funding_artifacts(record, kv_store)?;
+	persist_retry_required(record, kv_store, "Failed to persist RGB retry decision")
+}
+
+/// Validates RGB funding into an isolated stock without changing the live wallet.
+pub(crate) fn prepare_funding(
+	temporary_channel_id: &ChannelId, funding_txid: String, ldk_data_dir: &Path,
+	funding_output_index: u16, counterparty_node_id: &PublicKey,
+	consignment_endpoint: RgbTransport, push_asset_amount: Option<u64>, kv_store: &dyn KVStoreSync,
+) -> Result<PreparedFundingAcceptance, ChannelError> {
+	let temporary_channel_id = temporary_channel_id.0.as_hex().to_string();
+	let mut record = PendingFundingAcceptance {
+		version: PendingFundingAcceptance::VERSION,
+		temporary_channel_id,
+		counterparty_node_id: counterparty_node_id.to_string(),
+		funding_txid: funding_txid.clone(),
+		funding_output_index,
+		consignment_endpoint: consignment_endpoint.to_string(),
+		push_asset_amount,
+		stage: FundingAcceptanceStage::Validating,
+		consignment: None,
+		rgb_info: None,
+	};
+	write_pending_funding_acceptance(&record, kv_store)
+		.map_err(|error| funding_storage_error("Failed to persist RGB funding intent", error))?;
+
 	let handle = Handle::current();
-	let _ = handle.enter();
-	let accept_res = futures::executor::block_on(_accept_transfer(
+	let _runtime_guard = handle.enter();
+	let prepared = match futures::executor::block_on(_prepare_transfer_acceptance(
+		funding_txid.clone(),
 		ldk_data_dir,
 		funding_txid.clone(),
+		funding_output_index as u32,
 		consignment_endpoint,
 		kv_store,
-	));
-	let (consignment, remote_rgb_assignments) = match accept_res {
-		Ok(res) => res,
-		Err(RgbLibError::InvalidConsignment) => {
-			return Err(ChannelError::close("Invalid RGB consignment for funding".to_owned()))
+	)) {
+		Ok(prepared) => prepared,
+		Err(error) => {
+			persist_retry_required(
+				&mut record,
+				kv_store,
+				"Failed to persist rejected RGB funding validation",
+			)?;
+			return Err(funding_acceptance_error(error));
 		},
-		Err(RgbLibError::NoConsignment) => {
-			return Err(ChannelError::close("Failed to find RGB consignment".to_owned()))
-		},
-		Err(RgbLibError::UnknownRgbSchema { schema_id }) => {
-			return Err(ChannelError::close(format!("Unknown RGB schema: {schema_id}")))
-		},
-		Err(RgbLibError::UnsupportedSchema { asset_schema }) => {
-			return Err(ChannelError::close(format!("Unsupported RGB schema: {asset_schema}")))
-		},
-		Err(RgbLibError::Indexer { details })
-		| Err(RgbLibError::InvalidIndexer { details })
-		| Err(RgbLibError::Network { details }) => {
-			return Err(ChannelError::close(format!("Failed to connect to indexer: {details}")))
-		},
-		Err(e) => return Err(ChannelError::close(format!("Unexpected error: {e}"))),
 	};
 
-	let mut consignment_buf = Vec::new();
-	consignment.save(&mut consignment_buf).expect("unable to serialize consignment");
-	kv_store.write_rgb_consignment(&funding_txid, consignment_buf.clone());
-	let temp_chan_id = temporary_channel_id.0.as_hex().to_string();
-	kv_store.write_rgb_consignment(&temp_chan_id, consignment_buf);
+	let prepared_data = (|| {
+		let mut consignment_buf = Vec::new();
+		prepared
+			.consignment()
+			.save(&mut consignment_buf)
+			.map_err(|error| funding_storage_error("Failed to serialize RGB consignment", error))?;
+		if prepared.assignments().len() != 1 {
+			return Err(ChannelError::close(format!(
+				"Unexpected number of RGB assignments: {}",
+				prepared.assignments().len()
+			)));
+		}
+		let channel_rgb_amount = match prepared.assignments()[0] {
+			Assignment::Fungible(amt) => amt,
+			Assignment::NonFungible => 1,
+			_ => unreachable!("unsupported schema"),
+		};
+		let push_amount = push_asset_amount.unwrap_or(0);
+		let remote_rgb_amount = channel_rgb_amount.checked_sub(push_amount).ok_or_else(|| {
+			ChannelError::close(format!(
+				"RGB push amount {push_amount} exceeds received channel amount {channel_rgb_amount}"
+			))
+		})?;
+		let schema =
+			AssetSchema::from_schema_id(prepared.consignment().schema_id()).map_err(|error| {
+				ChannelError::close(format!("Unsupported RGB funding schema: {error}"))
+			})?;
+		Ok((
+			consignment_buf,
+			RgbInfo {
+				contract_id: prepared.consignment().contract_id(),
+				schema,
+				local_rgb_amount: push_amount,
+				remote_rgb_amount,
+				batch_transfer_idx: None,
+			},
+		))
+	})();
+	let (consignment_buf, rgb_info) = match prepared_data {
+		Ok(data) => data,
+		Err(error) => {
+			abort_prepared_with_record(prepared, &mut record, kv_store)?;
+			return Err(error);
+		},
+	};
+	record.stage = FundingAcceptanceStage::Prepared;
+	record.consignment = Some(consignment_buf);
+	record.rgb_info = Some(rgb_info);
+	if let Err(error) = write_pending_funding_acceptance(&record, kv_store)
+		.map_err(|error| funding_storage_error("Failed to persist prepared RGB funding", error))
+		.and_then(|_| persist_prepared_funding_artifacts(&record, kv_store))
+	{
+		abort_prepared_with_record(prepared, &mut record, kv_store)?;
+		return Err(error);
+	}
+	Ok(PreparedFundingAcceptance { prepared, record })
+}
 
-	if remote_rgb_assignments.len() != 1 {
+/// Promotes a prepared RGB stock while retaining its rollback snapshot.
+pub(crate) fn promote_funding(
+	acceptance: PreparedFundingAcceptance, kv_store: &dyn KVStoreSync,
+) -> Result<String, ChannelError> {
+	let PreparedFundingAcceptance { prepared, mut record } = acceptance;
+	let promoted = prepared.promote().map_err(funding_acceptance_error)?;
+	record.stage = FundingAcceptanceStage::Promoted;
+	if let Err(error) = write_pending_funding_acceptance(&record, kv_store)
+		.map_err(|error| funding_storage_error("Failed to persist promoted RGB funding", error))
+	{
+		promoted.resolve(RgbAcceptanceResolution::Rollback).map_err(funding_acceptance_error)?;
+		clear_prepared_funding_artifacts(&record, kv_store)?;
+		persist_retry_required(
+			&mut record,
+			kv_store,
+			"Failed to persist RGB funding retry after promotion rollback",
+		)?;
+		return Err(error);
+	}
+	Ok(record.temporary_channel_id)
+}
+
+/// Discards a prepared acceptance after durably recording the retry decision.
+pub(crate) fn abort_prepared_funding(
+	acceptance: PreparedFundingAcceptance, kv_store: &dyn KVStoreSync,
+) -> Result<(), ChannelError> {
+	let PreparedFundingAcceptance { prepared, mut record } = acceptance;
+	abort_prepared_with_record(prepared, &mut record, kv_store)
+}
+
+fn wallet_for_rgb_resolution(ldk_data_dir: &Path, kv_store: &dyn KVStoreSync) -> Wallet {
+	let (
+		data_dir,
+		bitcoin_network,
+		account_xpub_vanilla,
+		account_xpub_colored,
+		master_fingerprint,
+		reuse_addresses,
+	) = _get_wallet_data(ldk_data_dir, kv_store);
+	_new_rgb_wallet(
+		data_dir,
+		bitcoin_network,
+		account_xpub_vanilla,
+		account_xpub_colored,
+		master_fingerprint,
+		reuse_addresses,
+	)
+}
+
+/// Rolls back a funding acceptance before `funding_signed` can be released.
+pub(crate) fn rollback_funding(
+	temporary_channel_id: &str, ldk_data_dir: &Path, kv_store: &dyn KVStoreSync,
+) -> Result<(), ChannelError> {
+	let mut record = read_pending_funding_acceptance(temporary_channel_id, kv_store)
+		.map_err(|error| funding_storage_error("Failed to load RGB funding rollback", error))?;
+	record.stage = FundingAcceptanceStage::RollingBack;
+	write_pending_funding_acceptance(&record, kv_store)
+		.map_err(|error| funding_storage_error("Failed to persist RGB rollback decision", error))?;
+	let wallet = wallet_for_rgb_resolution(ldk_data_dir, kv_store);
+	if wallet.pending_rgb_acceptance().map_err(funding_acceptance_error)?.is_some() {
+		wallet
+			.resolve_pending_rgb_acceptance(&record.funding_txid, RgbAcceptanceResolution::Rollback)
+			.map_err(funding_acceptance_error)?;
+	}
+	clear_prepared_funding_artifacts(&record, kv_store)?;
+	persist_retry_required(&mut record, kv_store, "Failed to persist RGB retry decision")
+}
+
+/// Commits a promoted RGB stock after the initial channel monitor is durable.
+pub(crate) fn finalize_funding(
+	temporary_channel_id: &str, ldk_data_dir: &Path, kv_store: &dyn KVStoreSync,
+) -> Result<(), ChannelError> {
+	let mut record = read_pending_funding_acceptance(temporary_channel_id, kv_store)
+		.map_err(|error| funding_storage_error("Failed to load RGB funding commit", error))?;
+	if record.stage == FundingAcceptanceStage::Finalized {
+		return Ok(());
+	}
+	if record.stage == FundingAcceptanceStage::Promoted {
+		record.stage = FundingAcceptanceStage::Finalizing;
+		write_pending_funding_acceptance(&record, kv_store).map_err(|error| {
+			funding_storage_error("Failed to persist RGB funding commit decision", error)
+		})?;
+	} else if record.stage != FundingAcceptanceStage::Finalizing {
 		return Err(ChannelError::close(format!(
-			"Unexpected number of RGB assignments: {}",
-			remote_rgb_assignments.len()
+			"RGB funding cannot be finalized from {:?}",
+			record.stage
 		)));
 	}
-	let channel_rgb_amount = match remote_rgb_assignments[0] {
-		Assignment::Fungible(amt) => amt,
-		Assignment::NonFungible => 1,
-		_ => unreachable!("unsupported schema"),
-	};
-	let push_amount = push_asset_amount.unwrap_or(0);
-	let rgb_info = RgbInfo {
-		contract_id: consignment.contract_id(),
-		schema: AssetSchema::from_schema_id(consignment.schema_id()).unwrap(),
-		local_rgb_amount: push_amount,
-		remote_rgb_amount: channel_rgb_amount - push_amount,
-		batch_transfer_idx: None,
-	};
-	let temporary_channel_id_str = temporary_channel_id.0.as_hex().to_string();
-
-	kv_store.write_rgb_channel_info(&temporary_channel_id_str, &rgb_info, true);
-	kv_store.write_rgb_channel_info(&temporary_channel_id_str, &rgb_info, false);
+	record.consignment.as_ref().ok_or_else(|| {
+		ChannelError::close("Promoted RGB funding is missing its consignment".to_owned())
+	})?;
+	record.rgb_info.as_ref().ok_or_else(|| {
+		ChannelError::close("Promoted RGB funding is missing channel metadata".to_owned())
+	})?;
+	// The prepared artifacts are durable before promotion. `Channel::funding_created` moves their
+	// temporary-channel keys to the final channel ID before the initial monitor is registered, so a
+	// resumable monitor-completion action implies that rename already completed. Rewriting the
+	// temporary keys here would recreate stale metadata after every successful channel open.
+	let wallet = wallet_for_rgb_resolution(ldk_data_dir, kv_store);
+	if wallet.pending_rgb_acceptance().map_err(funding_acceptance_error)?.is_some() {
+		wallet
+			.resolve_pending_rgb_acceptance(&record.funding_txid, RgbAcceptanceResolution::Finalize)
+			.map_err(funding_acceptance_error)?;
+	}
+	record.stage = FundingAcceptanceStage::Finalized;
+	write_pending_funding_acceptance(&record, kv_store)
+		.map_err(|error| funding_storage_error("Failed to persist finalized RGB funding", error))?;
 
 	Ok(())
+}
+
+/// Reconciles interrupted RGB funding journals against durable monitor-completion actions.
+///
+/// A promoted acceptance is retained only when its corresponding completion action was serialized
+/// with the channel manager. Everything before that boundary is rolled back and marked retryable.
+pub(crate) fn reconcile_pending_funding_acceptances(
+	resumable_temporary_channel_ids: &[String], ldk_data_dir: &Path, kv_store: &dyn KVStoreSync,
+) -> Result<Vec<PendingFundingAcceptance>, ChannelError> {
+	let keys = kv_store
+		.list(RGB_PRIMARY_NS, RGB_FUNDING_ACCEPTANCE_NS)
+		.map_err(|error| funding_storage_error("Failed to list RGB funding journals", error))?;
+	if keys.is_empty() {
+		return Ok(Vec::new());
+	}
+	let wallet = wallet_for_rgb_resolution(ldk_data_dir, kv_store);
+	let mut records = Vec::new();
+	for key in keys {
+		let mut record = read_pending_funding_acceptance(&key, kv_store)
+			.map_err(|error| funding_storage_error("Failed to read RGB funding journal", error))?;
+		if matches!(
+			record.stage,
+			FundingAcceptanceStage::Finalized | FundingAcceptanceStage::RetryRequired
+		) {
+			records.push(record);
+			continue;
+		}
+		let pending = wallet.pending_rgb_acceptance().map_err(funding_acceptance_error)?;
+		if matches!(
+			record.stage,
+			FundingAcceptanceStage::Finalizing | FundingAcceptanceStage::RollingBack
+		) {
+			if let Some(pending) = pending {
+				if pending.operation_id() != record.funding_txid {
+					return Err(ChannelError::close(format!(
+						"RGB funding journal '{}' does not match stock journal '{}'",
+						record.funding_txid,
+						pending.operation_id(),
+					)));
+				}
+				let resolution = if record.stage == FundingAcceptanceStage::Finalizing {
+					RgbAcceptanceResolution::Finalize
+				} else {
+					RgbAcceptanceResolution::Rollback
+				};
+				wallet
+					.resolve_pending_rgb_acceptance(&record.funding_txid, resolution)
+					.map_err(funding_acceptance_error)?;
+			}
+			if record.stage == FundingAcceptanceStage::Finalizing {
+				record.stage = FundingAcceptanceStage::Finalized;
+				write_pending_funding_acceptance(&record, kv_store).map_err(|error| {
+					funding_storage_error("Failed to complete RGB funding commit recovery", error)
+				})?;
+			} else {
+				clear_prepared_funding_artifacts(&record, kv_store)?;
+				persist_retry_required(
+					&mut record,
+					kv_store,
+					"Failed to complete RGB funding rollback recovery",
+				)?;
+			}
+			records.push(record);
+			continue;
+		}
+		if pending.is_none()
+			&& matches!(
+				record.stage,
+				FundingAcceptanceStage::Validating | FundingAcceptanceStage::Prepared
+			) {
+			clear_prepared_funding_artifacts(&record, kv_store)?;
+			persist_retry_required(
+				&mut record,
+				kv_store,
+				"Failed to persist interrupted RGB validation",
+			)?;
+			records.push(record);
+			continue;
+		}
+		if pending.as_ref().map(|item| item.operation_id()) != Some(record.funding_txid.as_str()) {
+			return Err(ChannelError::close(format!(
+				"RGB funding journal '{}' does not own the active stock journal",
+				record.funding_txid,
+			)));
+		}
+		if record.stage == FundingAcceptanceStage::Promoted
+			&& resumable_temporary_channel_ids.contains(&record.temporary_channel_id)
+		{
+			if pending.as_ref().map(|item| item.operation_id())
+				!= Some(record.funding_txid.as_str())
+			{
+				return Err(ChannelError::close(
+					"Durable RGB funding action has no matching promoted stock".to_owned(),
+				));
+			}
+			records.push(record);
+			continue;
+		}
+		record.stage = FundingAcceptanceStage::RollingBack;
+		write_pending_funding_acceptance(&record, kv_store).map_err(|error| {
+			funding_storage_error("Failed to persist RGB recovery rollback", error)
+		})?;
+		if let Some(pending) = pending {
+			if pending.operation_id() != record.funding_txid {
+				return Err(ChannelError::close(format!(
+					"RGB funding journal '{}' does not match stock journal '{}'",
+					record.funding_txid,
+					pending.operation_id(),
+				)));
+			}
+			wallet
+				.resolve_pending_rgb_acceptance(
+					&record.funding_txid,
+					RgbAcceptanceResolution::Rollback,
+				)
+				.map_err(funding_acceptance_error)?;
+		}
+		clear_prepared_funding_artifacts(&record, kv_store)?;
+		persist_retry_required(&mut record, kv_store, "Failed to persist RGB recovery retry")?;
+		records.push(record);
+	}
+
+	Ok(records)
 }
 
 /// Update RGB channel amount in KVStore
@@ -955,4 +1513,91 @@ pub fn holder_validate_install_psbt_output_witness_scripts_hex(hex_scripts: Vec<
 /// Removes and returns witness script hex strings installed by [`holder_validate_install_psbt_output_witness_scripts_hex`], if any.
 pub fn holder_validate_take_psbt_output_witness_scripts_hex() -> Option<Vec<String>> {
 	HOLDER_VALIDATE_PSBT_WITNESS_SCRIPTS_HEX.with(|c| c.borrow_mut().take())
+}
+
+#[cfg(test)]
+mod funding_acceptance_tests {
+	use super::*;
+	use crate::util::test_utils::TestStore;
+
+	fn record(stage: FundingAcceptanceStage) -> PendingFundingAcceptance {
+		PendingFundingAcceptance {
+			version: PendingFundingAcceptance::VERSION,
+			temporary_channel_id: "01".repeat(32),
+			counterparty_node_id: "02".repeat(33),
+			funding_txid: "03".repeat(32),
+			funding_output_index: 0,
+			consignment_endpoint: "rpc://127.0.0.1:3000/json-rpc".to_owned(),
+			push_asset_amount: Some(500),
+			stage,
+			consignment: None,
+			rgb_info: None,
+		}
+	}
+
+	#[test]
+	fn pending_funding_state_survives_reopen() {
+		let store = TestStore::new(false);
+		let validating = record(FundingAcceptanceStage::Validating);
+		write_pending_funding_acceptance(&validating, &store).unwrap();
+
+		let after_reopen = read_pending_funding_acceptance(validating.key(), &store).unwrap();
+		assert_eq!(after_reopen, validating);
+
+		remove_pending_funding_acceptance(validating.key(), &store).unwrap();
+		assert!(read_pending_funding_acceptance(validating.key(), &store).is_err());
+	}
+
+	#[test]
+	fn pending_funding_state_rejects_malformed_identity() {
+		let store = TestStore::new(false);
+		let mut malformed = record(FundingAcceptanceStage::Validating);
+		malformed.funding_txid = "zz".repeat(32);
+		assert!(write_pending_funding_acceptance(&malformed, &store).is_err());
+	}
+
+	#[test]
+	fn channel_rename_retains_finalized_funding_journal_for_application_backup() {
+		let store = TestStore::new(false);
+		let temporary_channel_id = ChannelId::from_bytes([1; 32]);
+		let channel_id = ChannelId::from_bytes([2; 32]);
+		let temporary_channel_id_hex = temporary_channel_id.0.as_hex().to_string();
+		let info = RgbInfo {
+			contract_id: ContractId::from_str(
+				"rgb:Ar4ouaLv-b7f7Dc_-z5EMvtu-FA5KNh1-nlae~jk-8xMBo7E",
+			)
+			.unwrap(),
+			schema: AssetSchema::Nia,
+			local_rgb_amount: 500,
+			remote_rgb_amount: 0,
+			batch_transfer_idx: None,
+		};
+		store.write_rgb_channel_info(&temporary_channel_id_hex, &info, false);
+		store.write_rgb_channel_info(&temporary_channel_id_hex, &info, true);
+		let mut finalized = record(FundingAcceptanceStage::Finalized);
+		finalized.temporary_channel_id = temporary_channel_id_hex.clone();
+		write_pending_funding_acceptance(&finalized, &store).unwrap();
+
+		rename_rgb_files(&channel_id, &temporary_channel_id, &store).unwrap();
+
+		assert_eq!(
+			read_pending_funding_acceptance(&temporary_channel_id_hex, &store).unwrap(),
+			finalized,
+		);
+		assert_eq!(
+			store.read_rgb_channel_info(&channel_id.0.as_hex().to_string(), false).unwrap(),
+			info,
+		);
+		rename_rgb_files(&channel_id, &temporary_channel_id, &store).unwrap();
+	}
+
+	#[test]
+	fn channel_rename_reports_missing_metadata_without_panicking() {
+		let store = TestStore::new(false);
+		let temporary_channel_id = ChannelId::from_bytes([1; 32]);
+		let channel_id = ChannelId::from_bytes([2; 32]);
+
+		let error = rename_rgb_files(&channel_id, &temporary_channel_id, &store).unwrap_err();
+		assert_eq!(error.kind(), io::ErrorKind::NotFound);
+	}
 }

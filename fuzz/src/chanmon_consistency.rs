@@ -583,7 +583,7 @@ fn send_payment(
 		.find(|chan| chan.short_channel_id == Some(dest_chan_id))
 		.map(|chan| (chan.next_outbound_htlc_minimum_msat, chan.next_outbound_htlc_limit_msat))
 		.unwrap_or((0, 0));
-	let route_params = RouteParameters::from_payment_params_and_value(
+	let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 		PaymentParameters::from_node_id(source.get_our_node_id(), TEST_FINAL_CLTV),
 		amt,
 	);
@@ -656,7 +656,7 @@ fn send_hop_payment(
 		.map(|chan| (chan.next_outbound_htlc_minimum_msat, chan.next_outbound_htlc_limit_msat))
 		.unwrap_or((0, 0));
 	let first_hop_fee = 50_000;
-	let route_params = RouteParameters::from_payment_params_and_value(
+	let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 		PaymentParameters::from_node_id(source.get_our_node_id(), TEST_FINAL_CLTV),
 		amt,
 	);

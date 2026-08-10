@@ -478,7 +478,7 @@ impl_writeable_tlv_based!(RouteHop, {
 	(8, fee_msat, required),
 	(10, cltv_expiry_delta, required),
 	(12, rgb_payment, option),
-	(14, payment_amount, required),
+	(14, payment_amount, (default_value, 0)),
 });
 
 /// A Trampoline hop in a route, and additional metadata about it. "Hop" is defined as a node.
@@ -746,6 +746,14 @@ impl RouteParameters {
 	#[rustfmt::skip]
 	pub fn from_payment_params_and_value(payment_params: PaymentParameters, final_value_msat: u64, rgb_payment: Option<(ContractId, u64)>) -> Self {
 		Self { payment_params, final_value_msat, max_total_routing_fee_msat: Some(final_value_msat / 100 + 50_000), rgb_payment }
+	}
+
+	/// Constructs [`RouteParameters`] for a non-RGB payment.
+	///
+	/// [`Self::max_total_routing_fee_msat`] defaults to 1% of the payment amount + 50 sats.
+	#[rustfmt::skip]
+	pub fn from_payment_params_and_value_without_rgb(payment_params: PaymentParameters, final_value_msat: u64) -> Self {
+		Self::from_payment_params_and_value(payment_params, final_value_msat, None)
 	}
 
 	/// Sets the maximum number of hops that can be included in a payment path, based on the provided
@@ -3939,7 +3947,6 @@ fn build_route_from_hops_internal<L: Deref>(
 	get_route(our_node_pubkey, route_params, network_graph, None, logger, &scorer, &Default::default(), random_seed_bytes)
 }
 
-/*
 #[cfg(test)]
 mod tests {
 	use crate::blinded_path::payment::{BlindedPayInfo, BlindedPaymentPath};
@@ -3994,6 +4001,8 @@ mod tests {
 			features: InitFeatures, outbound_capacity_msat: u64) -> ChannelDetails {
 		#[allow(deprecated)] // TODO: Remove once balance_msat is removed.
 		ChannelDetails {
+			inbound_htlc_maximum_rgb: 0,
+			next_outbound_htlc_limit_rgb: 0,
 			channel_id: ChannelId::new_zero(),
 			counterparty: ChannelCounterparty {
 				features,
@@ -4072,7 +4081,7 @@ mod tests {
 
 		// Simple route to 2 via 1
 
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params.clone(), 0);
 		if let Err(err) = get_route(&our_id,
 			&route_params, &network_graph.read_only(), None, Arc::clone(&logger), &scorer,
@@ -4081,7 +4090,7 @@ mod tests {
 		} else { panic!(); }
 
 		payment_params.max_path_length = 2;
-		let mut route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+		let mut route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
 		assert_eq!(route.paths[0].hops.len(), 2);
@@ -4118,7 +4127,7 @@ mod tests {
 
 		let our_chans = [get_channel_details(Some(2), our_id, InitFeatures::from_le_bytes(vec![0b11]), 100000)];
 
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 		if let Err(err) = get_route(&our_id,
 			&route_params, &network_graph.read_only(), Some(&our_chans.iter().collect::<Vec<_>>()),
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes) {
@@ -4143,6 +4152,7 @@ mod tests {
 
 		// Disable other paths
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 12,
 			timestamp: 2,
@@ -4156,6 +4166,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 3,
 			timestamp: 2,
@@ -4169,6 +4180,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 13,
 			timestamp: 2,
@@ -4182,6 +4194,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 6,
 			timestamp: 2,
@@ -4195,6 +4208,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 7,
 			timestamp: 2,
@@ -4211,6 +4225,7 @@ mod tests {
 		// Check against amount_to_transfer_over_msat.
 		// Set minimal HTLC of 200_000_000 msat.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 3,
@@ -4227,6 +4242,7 @@ mod tests {
 		// Second hop only allows to forward 199_999_999 at most, thus not allowing the first hop to
 		// be used.
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 4,
 			timestamp: 3,
@@ -4241,7 +4257,7 @@ mod tests {
 		});
 
 		// Not possible to send 199_999_999, because the minimum on channel=2 is 200_000_000.
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, 199_999_999);
 		if let Err(err) = get_route(&our_id,
 			&route_params, &network_graph.read_only(), None, Arc::clone(&logger), &scorer,
@@ -4251,6 +4267,7 @@ mod tests {
 
 		// Lift the restriction on the first hop.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 4,
@@ -4286,6 +4303,7 @@ mod tests {
 		// One path allows transferring 35-40 sats, another one also allows 35-40 sats.
 		// Thus, they can't send 60 without overpaying.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 2,
@@ -4299,6 +4317,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 12,
 			timestamp: 3,
@@ -4314,6 +4333,7 @@ mod tests {
 
 		// Make 0 fee.
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 13,
 			timestamp: 2,
@@ -4327,6 +4347,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 4,
 			timestamp: 2,
@@ -4342,6 +4363,7 @@ mod tests {
 
 		// Disable other paths
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 3,
@@ -4355,7 +4377,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 
-		let mut route_params = RouteParameters::from_payment_params_and_value(
+		let mut route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params.clone(), 60_000);
 		route_params.max_total_routing_fee_msat = Some(15_000);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
@@ -4368,6 +4390,7 @@ mod tests {
 		// Now, test that if there are 2 paths, a "cheaper" by fee path wouldn't be prioritized
 		// while taking even more fee to match htlc_minimum_msat.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 12,
 			timestamp: 4,
@@ -4381,6 +4404,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 3,
@@ -4394,6 +4418,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 4,
 			timestamp: 4,
@@ -4415,7 +4440,7 @@ mod tests {
 		let fees = route.paths[0].hops[0].fee_msat;
 		assert_eq!(fees, 5_000);
 
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 50_000);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 50_000);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
 		// Not fine to overpay for htlc_minimum_msat if it requires paying more than fee on
@@ -4440,6 +4465,7 @@ mod tests {
 
 		// First disable all paths except the us -> node1 -> node2 path
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 13,
 			timestamp: 2,
@@ -4455,6 +4481,7 @@ mod tests {
 
 		// Set channel 4 to free but with a high htlc_minimum_msat
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 4,
 			timestamp: 2,
@@ -4472,7 +4499,7 @@ mod tests {
 		// is overrun. Note that the fees are actually calculated on 3*payment amount as that's
 		// what we try to find a route for, so this test only just happens to work out to exactly
 		// the fee limit.
-		let mut route_params = RouteParameters::from_payment_params_and_value(
+		let mut route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params.clone(), 5_000);
 		route_params.max_total_routing_fee_msat = Some(9_999);
 		if let Err(err) = get_route(&our_id,
@@ -4481,7 +4508,7 @@ mod tests {
 				assert_eq!(err, "Failed to find route that adheres to the maximum total fee limit");
 		} else { panic!(); }
 
-		let mut route_params = RouteParameters::from_payment_params_and_value(
+		let mut route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params.clone(), 5_000);
 		route_params.max_total_routing_fee_msat = Some(10_000);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
@@ -4500,6 +4527,7 @@ mod tests {
 
 		// // Disable channels 4 and 12 by flags=2
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 4,
 			timestamp: 2,
@@ -4513,6 +4541,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 12,
 			timestamp: 2,
@@ -4527,7 +4556,7 @@ mod tests {
 		});
 
 		// If all the channels require some features we don't understand, route should fail
-		let mut route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+		let mut route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 		if let Err(err) = get_route(&our_id,
 			&route_params, &network_graph.read_only(), None, Arc::clone(&logger), &scorer,
 			&Default::default(), &random_seed_bytes) {
@@ -4575,7 +4604,7 @@ mod tests {
 		add_or_update_node(&gossip_sync, &secp_ctx, &privkeys[7], unknown_features.clone(), 1);
 
 		// If all nodes require some features we don't understand, route should fail
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 		if let Err(err) = get_route(&our_id,
 			&route_params, &network_graph.read_only(), None, Arc::clone(&logger), &scorer,
 			&Default::default(), &random_seed_bytes) {
@@ -4619,7 +4648,7 @@ mod tests {
 
 		// Route to 1 via 2 and 3 because our channel to 1 is disabled
 		let payment_params = PaymentParameters::from_node_id(nodes[0], 42);
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
 		assert_eq!(route.paths[0].hops.len(), 3);
@@ -4647,7 +4676,7 @@ mod tests {
 
 		// If we specify a channel to node7, that overrides our local channel view and that gets used
 		let payment_params = PaymentParameters::from_node_id(nodes[2], 42);
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 		let our_chans = [get_channel_details(Some(42), nodes[7].clone(),
 			InitFeatures::from_le_bytes(vec![0b11]), 250_000_000)];
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(),
@@ -4677,6 +4706,7 @@ mod tests {
 			proportional_millionths: 0,
 		};
 		vec![RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[3],
 			short_channel_id: 8,
 			fees: zero_fees,
@@ -4685,6 +4715,7 @@ mod tests {
 			htlc_maximum_msat: None,
 		}
 		]), RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[4],
 			short_channel_id: 9,
 			fees: RoutingFees {
@@ -4695,6 +4726,7 @@ mod tests {
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}]), RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[5],
 			short_channel_id: 10,
 			fees: zero_fees,
@@ -4711,6 +4743,7 @@ mod tests {
 			proportional_millionths: 0,
 		};
 		vec![RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[2],
 			short_channel_id: 5,
 			fees: RoutingFees {
@@ -4721,6 +4754,7 @@ mod tests {
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}, RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[3],
 			short_channel_id: 8,
 			fees: zero_fees,
@@ -4729,6 +4763,7 @@ mod tests {
 			htlc_maximum_msat: None,
 		}
 		]), RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[4],
 			short_channel_id: 9,
 			fees: RoutingFees {
@@ -4739,6 +4774,7 @@ mod tests {
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}]), RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[5],
 			short_channel_id: 10,
 			fees: zero_fees,
@@ -4762,6 +4798,7 @@ mod tests {
 
 		// First check that last hop can't have its source as the payee.
 		let invalid_last_hop = RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[6],
 			short_channel_id: 8,
 			fees: RoutingFees {
@@ -4778,7 +4815,7 @@ mod tests {
 		{
 			let payment_params = PaymentParameters::from_node_id(nodes[6], 42)
 				.with_route_hints(invalid_last_hops).unwrap();
-			let route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 			if let Err(err) = get_route(&our_id,
 				&route_params, &network_graph.read_only(), None, Arc::clone(&logger), &scorer,
 				&Default::default(), &random_seed_bytes) {
@@ -4789,7 +4826,7 @@ mod tests {
 		let mut payment_params = PaymentParameters::from_node_id(nodes[6], 42)
 			.with_route_hints(last_hops_multi_private_channels(&nodes)).unwrap();
 		payment_params.max_path_length = 5;
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
 		assert_eq!(route.paths[0].hops.len(), 5);
@@ -4839,6 +4876,7 @@ mod tests {
 			proportional_millionths: 0,
 		};
 		vec![RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[3],
 			short_channel_id: 8,
 			fees: zero_fees,
@@ -4848,6 +4886,7 @@ mod tests {
 		}]), RouteHint(vec![
 
 		]), RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[5],
 			short_channel_id: 10,
 			fees: zero_fees,
@@ -4867,7 +4906,7 @@ mod tests {
 		let random_seed_bytes = [42; 32];
 
 		// Test handling of an empty RouteHint passed in Invoice.
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
 		assert_eq!(route.paths[0].hops.len(), 5);
@@ -4919,6 +4958,7 @@ mod tests {
 			proportional_millionths: 0,
 		};
 		vec![RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: hint_hops[0],
 			short_channel_id: 0xff00,
 			fees: RoutingFees {
@@ -4929,6 +4969,7 @@ mod tests {
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}, RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: hint_hops[1],
 			short_channel_id: 0xff01,
 			fees: zero_fees,
@@ -4954,6 +4995,7 @@ mod tests {
 
 		// Disabling channels 6 & 7 by flags=2
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 6,
 			timestamp: 2,
@@ -4967,6 +5009,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 7,
 			timestamp: 2,
@@ -4980,7 +5023,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 
-		let mut route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+		let mut route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 		route_params.payment_params.max_path_length = 4;
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -5035,6 +5078,7 @@ mod tests {
 
 		// Disabling channels 6 & 7 by flags=2
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 6,
 			timestamp: 2,
@@ -5048,6 +5092,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 7,
 			timestamp: 2,
@@ -5061,7 +5106,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &[42u8; 32]).unwrap();
 		assert_eq!(route.paths[0].hops.len(), 4);
@@ -5102,6 +5147,7 @@ mod tests {
 			proportional_millionths: 0,
 		};
 		vec![RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[4],
 			short_channel_id: 11,
 			fees: zero_fees,
@@ -5109,6 +5155,7 @@ mod tests {
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}, RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[3],
 			short_channel_id: 8,
 			fees: zero_fees,
@@ -5116,6 +5163,7 @@ mod tests {
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}]), RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[4],
 			short_channel_id: 9,
 			fees: RoutingFees {
@@ -5126,6 +5174,7 @@ mod tests {
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}]), RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[5],
 			short_channel_id: 10,
 			fees: zero_fees,
@@ -5147,7 +5196,7 @@ mod tests {
 		// This test shows that public routes can be present in the invoice
 		// which would be handled in the same manner.
 
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
 		assert_eq!(route.paths[0].hops.len(), 5);
@@ -5203,7 +5252,7 @@ mod tests {
 		let mut last_hops = last_hops(&nodes);
 		let payment_params = PaymentParameters::from_node_id(nodes[6], 42)
 			.with_route_hints(last_hops.clone()).unwrap();
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(),
 			Some(&our_chans.iter().collect::<Vec<_>>()), Arc::clone(&logger), &scorer,
 			&Default::default(), &random_seed_bytes).unwrap();
@@ -5228,7 +5277,7 @@ mod tests {
 		// Revert to via 6 as the fee on 8 goes up
 		let payment_params = PaymentParameters::from_node_id(nodes[6], 42)
 			.with_route_hints(last_hops).unwrap();
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params.clone(), 100);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -5265,7 +5314,7 @@ mod tests {
 		assert_eq!(route.paths[0].hops[3].channel_features.le_flags(), &Vec::<u8>::new()); // We can't learn any flags from invoices, sadly
 
 		// ...but still use 8 for larger payments as 6 has a variable feerate
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 2000);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 2000);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
 		assert_eq!(route.paths[0].hops.len(), 5);
@@ -5316,6 +5365,7 @@ mod tests {
 
 		// If we specify a channel to a middle hop, that overrides our local channel view and that gets used
 		let last_hops = RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: middle_node_id,
 			short_channel_id: 8,
 			fees: RoutingFees {
@@ -5332,7 +5382,7 @@ mod tests {
 		let random_seed_bytes = [42; 32];
 		let logger = ln_test_utils::TestLogger::new();
 		let network_graph = NetworkGraph::new(Network::Testnet, &logger);
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, route_val);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, route_val);
 		let route = get_route(&source_node_id, &route_params, &network_graph.read_only(),
 				Some(&our_chans.iter().collect::<Vec<_>>()), &logger, &scorer, &Default::default(),
 				&random_seed_bytes);
@@ -5405,6 +5455,7 @@ mod tests {
 
 		// First disable all other paths.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 2,
@@ -5418,6 +5469,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 12,
 			timestamp: 2,
@@ -5434,6 +5486,7 @@ mod tests {
 		// Make the first channel (#1) very permissive,
 		// and we will be testing all limits on the second channel.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 2,
@@ -5450,6 +5503,7 @@ mod tests {
 		// First, let's see if routing works if we have absolutely no idea about the available amount.
 		// In this case, it should be set to 250_000 sats.
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 3,
 			timestamp: 2,
@@ -5465,7 +5519,7 @@ mod tests {
 
 		{
 			// Attempt to route more than available results in a failure.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 250_000_001);
 			if let Err(err) = get_route(
 					&our_id, &route_params, &network_graph.read_only(), None,
@@ -5476,7 +5530,7 @@ mod tests {
 
 		{
 			// Now, attempt to route an exact amount we have should be fine.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 250_000_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -5490,6 +5544,7 @@ mod tests {
 		// Check that setting next_outbound_htlc_limit_msat in first_hops limits the channels.
 		// Disable channel #1 and use another first hop.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 3,
@@ -5508,7 +5563,7 @@ mod tests {
 
 		{
 			// Attempt to route more than available results in a failure.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 200_000_001);
 			if let Err(err) = get_route(
 					&our_id, &route_params, &network_graph.read_only(),
@@ -5520,7 +5575,7 @@ mod tests {
 
 		{
 			// Now, attempt to route an exact amount we have should be fine.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 200_000_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(),
 				Some(&our_chans.iter().collect::<Vec<_>>()), Arc::clone(&logger), &scorer,
@@ -5534,6 +5589,7 @@ mod tests {
 
 		// Enable channel #1 back.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 4,
@@ -5550,6 +5606,7 @@ mod tests {
 
 		// Now let's see if routing works if we know only htlc_maximum_msat.
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 3,
 			timestamp: 3,
@@ -5565,7 +5622,7 @@ mod tests {
 
 		{
 			// Attempt to route more than available results in a failure.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 15_001);
 			if let Err(err) = get_route(
 					&our_id, &route_params, &network_graph.read_only(), None, Arc::clone(&logger),
@@ -5576,7 +5633,7 @@ mod tests {
 
 		{
 			// Now, attempt to route an exact amount we have should be fine.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 15_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -5592,6 +5649,7 @@ mod tests {
 		// We can't change UTXO capacity on the fly, so we'll disable
 		// the existing channel and add another one with the capacity we need.
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 3,
 			timestamp: 4,
@@ -5617,6 +5675,7 @@ mod tests {
 
 		add_channel(&gossip_sync, &secp_ctx, &privkeys[0], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(3)), 333);
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 333,
 			timestamp: 1,
@@ -5630,6 +5689,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 333,
 			timestamp: 1,
@@ -5645,7 +5705,7 @@ mod tests {
 
 		{
 			// Attempt to route more than available results in a failure.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 15_001);
 			if let Err(err) = get_route(
 					&our_id, &route_params, &network_graph.read_only(), None, Arc::clone(&logger),
@@ -5656,7 +5716,7 @@ mod tests {
 
 		{
 			// Now, attempt to route an exact amount we have should be fine.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 15_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -5669,6 +5729,7 @@ mod tests {
 
 		// Now let's see if routing chooses htlc_maximum_msat over UTXO capacity.
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 333,
 			timestamp: 6,
@@ -5684,7 +5745,7 @@ mod tests {
 
 		{
 			// Attempt to route more than available results in a failure.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 10_001);
 			if let Err(err) = get_route(
 					&our_id, &route_params, &network_graph.read_only(), None, Arc::clone(&logger),
@@ -5695,7 +5756,7 @@ mod tests {
 
 		{
 			// Now, attempt to route an exact amount we have should be fine.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 10_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -5727,6 +5788,7 @@ mod tests {
 
 		// Disable other potential paths.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 2,
@@ -5740,6 +5802,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 7,
 			timestamp: 2,
@@ -5756,6 +5819,7 @@ mod tests {
 		// Limit capacities
 
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 12,
 			timestamp: 2,
@@ -5769,6 +5833,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 13,
 			timestamp: 2,
@@ -5783,6 +5848,7 @@ mod tests {
 		});
 
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 6,
 			timestamp: 2,
@@ -5796,6 +5862,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[4], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 11,
 			timestamp: 2,
@@ -5810,7 +5877,7 @@ mod tests {
 		});
 		{
 			// Attempt to route more than available results in a failure.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 60_000);
 			if let Err(err) = get_route(
 					&our_id, &route_params, &network_graph.read_only(), None, Arc::clone(&logger),
@@ -5821,7 +5888,7 @@ mod tests {
 
 		{
 			// Now, attempt to route 49 sats (just a bit below the capacity).
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 49_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -5837,7 +5904,7 @@ mod tests {
 
 		{
 			// Attempt to route an exact amount is also fine
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params, 50_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -5863,6 +5930,7 @@ mod tests {
 
 		// Path via node0 is channels {1, 3}. Limit them to 100 and 50 sats (total limit 50).
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 2,
@@ -5876,6 +5944,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 3,
 			timestamp: 2,
@@ -5890,7 +5959,7 @@ mod tests {
 		});
 
 		{
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params, 50_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -5967,6 +6036,7 @@ mod tests {
 
 		// Path via node0 is channels {1, 3}. Limit them to 100 and 50 sats (total limit 50).
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 2,
@@ -5980,6 +6050,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 3,
 			timestamp: 2,
@@ -5996,6 +6067,7 @@ mod tests {
 		// Path via node7 is channels {12, 13}. Limit them to 60 and 60 sats
 		// (total limit 60).
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 12,
 			timestamp: 2,
@@ -6009,6 +6081,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 13,
 			timestamp: 2,
@@ -6025,6 +6098,7 @@ mod tests {
 		// Path via node1 is channels {2, 4}. Limit them to 200 and 180 sats
 		// (total capacity 180 sats).
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 2,
@@ -6038,6 +6112,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 4,
 			timestamp: 2,
@@ -6053,7 +6128,7 @@ mod tests {
 
 		{
 			// Attempt to route more than available results in a failure.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 300_000);
 			if let Err(err) = get_route(
 				&our_id, &route_params, &network_graph.read_only(), None,
@@ -6065,7 +6140,7 @@ mod tests {
 		{
 			// Attempt to route while setting max_path_count to 0 results in a failure.
 			let zero_payment_params = payment_params.clone().with_max_path_count(0);
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				zero_payment_params, 100);
 			if let Err(err) = get_route(
 				&our_id, &route_params, &network_graph.read_only(), None,
@@ -6079,7 +6154,7 @@ mod tests {
 			// This is the case because the minimal_value_contribution_msat would require each path
 			// to account for 1/3 of the total value, which is violated by 2 out of 3 paths.
 			let fail_payment_params = payment_params.clone().with_max_path_count(3);
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				fail_payment_params, 250_000);
 			if let Err(err) = get_route(
 				&our_id, &route_params, &network_graph.read_only(), None,
@@ -6091,7 +6166,7 @@ mod tests {
 		{
 			// Now, attempt to route 250 sats (just a bit below the capacity).
 			// Our algorithm should provide us with these 3 paths.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 250_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -6111,7 +6186,7 @@ mod tests {
 
 		{
 			// Attempt to route an exact amount is also fine
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 290_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -6206,6 +6281,7 @@ mod tests {
 
 		// Disable other potential paths.
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 7,
 			timestamp: 2,
@@ -6219,6 +6295,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 4,
 			timestamp: 2,
@@ -6234,6 +6311,7 @@ mod tests {
 
 		// Path via {node0, node2} is channels {1, 3, 5}.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 2,
@@ -6247,6 +6325,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 3,
 			timestamp: 2,
@@ -6262,6 +6341,7 @@ mod tests {
 
 		add_channel(&gossip_sync, &secp_ctx, &privkeys[1], &privkeys[3], ChannelFeatures::from_le_bytes(id_to_feature_flags(16)), 16);
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 16,
 			timestamp: 2,
@@ -6275,6 +6355,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[3], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 16,
 			timestamp: 2,
@@ -6292,6 +6373,7 @@ mod tests {
 		// Add 100 sats to the capacities of {12, 13}, because these channels
 		// are also used for 3rd path. 100 sats for the rest. Total capacity: 100 sats.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 12,
 			timestamp: 2,
@@ -6305,6 +6387,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 13,
 			timestamp: 2,
@@ -6319,6 +6402,7 @@ mod tests {
 		});
 
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 6,
 			timestamp: 2,
@@ -6332,6 +6416,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[4], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 11,
 			timestamp: 2,
@@ -6349,7 +6434,7 @@ mod tests {
 		// We already limited them to 200 sats (they are used twice for 100 sats).
 		// Nothing to do here.
 
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, amt);
 		let res = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes);
@@ -6382,6 +6467,7 @@ mod tests {
 
 		// Disable other potential paths.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 2,
@@ -6396,6 +6482,7 @@ mod tests {
 		});
 
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 7,
 			timestamp: 2,
@@ -6411,6 +6498,7 @@ mod tests {
 
 		// Path via {node0, node2} is channels {1, 3, 5}.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 2,
@@ -6424,6 +6512,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 3,
 			timestamp: 2,
@@ -6439,6 +6528,7 @@ mod tests {
 
 		add_channel(&gossip_sync, &secp_ctx, &privkeys[2], &privkeys[3], ChannelFeatures::from_le_bytes(id_to_feature_flags(5)), 5);
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 5,
 			timestamp: 2,
@@ -6452,6 +6542,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[3], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 5,
 			timestamp: 2,
@@ -6476,6 +6567,7 @@ mod tests {
 		// - fee for channel 6 is 150 sats
 		// Let's test this by enforcing these 2 conditions and removing other limits.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 12,
 			timestamp: 2,
@@ -6489,6 +6581,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 13,
 			timestamp: 2,
@@ -6503,6 +6596,7 @@ mod tests {
 		});
 
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 6,
 			timestamp: 2,
@@ -6516,6 +6610,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[4], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 11,
 			timestamp: 2,
@@ -6531,7 +6626,7 @@ mod tests {
 
 		{
 			// Attempt to route more than available results in a failure.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 210_000);
 			if let Err(err) = get_route(
 					&our_id, &route_params, &network_graph.read_only(), None, Arc::clone(&logger),
@@ -6542,7 +6637,8 @@ mod tests {
 
 		{
 			// Attempt to route while setting max_total_routing_fee_msat to 149_999 results in a failure.
-			let route_params = RouteParameters { payment_params: payment_params.clone(), final_value_msat: 200_000,
+			let route_params = RouteParameters {
+				rgb_payment: None, payment_params: payment_params.clone(), final_value_msat: 200_000,
 				max_total_routing_fee_msat: Some(149_999) };
 			if let Err(err) = get_route(
 				&our_id, &route_params, &network_graph.read_only(), None, Arc::clone(&logger),
@@ -6553,7 +6649,8 @@ mod tests {
 
 		{
 			// Now, attempt to route 200 sats (exact amount we can route).
-			let route_params = RouteParameters { payment_params: payment_params.clone(), final_value_msat: 200_000,
+			let route_params = RouteParameters {
+				rgb_payment: None, payment_params: payment_params.clone(), final_value_msat: 200_000,
 				max_total_routing_fee_msat: Some(150_000) };
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -6593,6 +6690,7 @@ mod tests {
 		let payment_params = PaymentParameters::from_node_id(PublicKey::from_slice(&[2; 33]).unwrap(), 42)
 			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config)).unwrap()
 			.with_route_hints(vec![RouteHint(vec![RouteHintHop {
+				htlc_maximum_rgb: None,
 				src_node_id: nodes[2],
 				short_channel_id: 42,
 				fees: RoutingFees { base_msat: 0, proportional_millionths: 0 },
@@ -6607,6 +6705,7 @@ mod tests {
 		// we think we can only send up to 1 additional sat over the last-hop but refuse to as its
 		// under 5% of our payment amount.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 2,
@@ -6620,6 +6719,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 2,
@@ -6633,6 +6733,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 4,
 			timestamp: 2,
@@ -6646,6 +6747,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 13,
 			timestamp: 2,
@@ -6661,7 +6763,7 @@ mod tests {
 
 		// Get a route for 100 sats and check that we found the MPP route no problem and didn't
 		// overpay at all.
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, 100_000);
 		let mut route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -6706,6 +6808,7 @@ mod tests {
 
 		// Path via node0 is channels {1, 3}. Limit them to 100 and 50 sats (total limit 50);
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 2,
@@ -6719,6 +6822,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 3,
 			timestamp: 2,
@@ -6734,6 +6838,7 @@ mod tests {
 
 		// Path via node7 is channels {12, 13}. Limit them to 60 and 60 sats (total limit 60);
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 12,
 			timestamp: 2,
@@ -6747,6 +6852,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 13,
 			timestamp: 2,
@@ -6762,6 +6868,7 @@ mod tests {
 
 		// Path via node1 is channels {2, 4}. Limit them to 20 and 20 sats (total capacity 20 sats).
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 2,
@@ -6775,6 +6882,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 4,
 			timestamp: 2,
@@ -6790,7 +6898,7 @@ mod tests {
 
 		{
 			// Attempt to route more than available results in a failure.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 150_000);
 			if let Err(err) = get_route(
 					&our_id, &route_params, &network_graph.read_only(), None, Arc::clone(&logger),
@@ -6802,7 +6910,7 @@ mod tests {
 		{
 			// Now, attempt to route 125 sats (just a bit below the capacity of 3 channels).
 			// Our algorithm should provide us with these 3 paths.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 125_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -6818,7 +6926,7 @@ mod tests {
 
 		{
 			// Attempt to route without the last small cheap channel
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params, 90_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -6872,6 +6980,7 @@ mod tests {
 		add_channel(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[1], ChannelFeatures::from_le_bytes(id_to_feature_flags(6)), 6);
 		for (key, channel_flags) in [(&our_privkey, 0), (&privkeys[1], 3)] {
 			update_channel(&gossip_sync, &secp_ctx, key, UnsignedChannelUpdate {
+				htlc_maximum_rgb: 0,
 				chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 				short_channel_id: 6,
 				timestamp: 1,
@@ -6890,6 +6999,7 @@ mod tests {
 		add_channel(&gossip_sync, &secp_ctx, &privkeys[1], &privkeys[4], ChannelFeatures::from_le_bytes(id_to_feature_flags(5)), 5);
 		for (key, channel_flags) in [(&privkeys[1], 0), (&privkeys[4], 3)] {
 			update_channel(&gossip_sync, &secp_ctx, key, UnsignedChannelUpdate {
+				htlc_maximum_rgb: 0,
 				chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 				short_channel_id: 5,
 				timestamp: 1,
@@ -6908,6 +7018,7 @@ mod tests {
 		add_channel(&gossip_sync, &secp_ctx, &privkeys[4], &privkeys[3], ChannelFeatures::from_le_bytes(id_to_feature_flags(4)), 4);
 		for (key, channel_flags) in [(&privkeys[4], 0), (&privkeys[3], 3)] {
 			update_channel(&gossip_sync, &secp_ctx, key, UnsignedChannelUpdate {
+				htlc_maximum_rgb: 0,
 				chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 				short_channel_id: 4,
 				timestamp: 1,
@@ -6926,6 +7037,7 @@ mod tests {
 		add_channel(&gossip_sync, &secp_ctx, &privkeys[3], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(3)), 3);
 		for (key, channel_flags) in [(&privkeys[3], 0), (&privkeys[2], 3)] {
 			update_channel(&gossip_sync, &secp_ctx, key, UnsignedChannelUpdate {
+				htlc_maximum_rgb: 0,
 				chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 				short_channel_id: 3,
 				timestamp: 1,
@@ -6944,6 +7056,7 @@ mod tests {
 		add_channel(&gossip_sync, &secp_ctx, &privkeys[2], &privkeys[4], ChannelFeatures::from_le_bytes(id_to_feature_flags(2)), 2);
 		for (key, channel_flags) in [(&privkeys[2], 0), (&privkeys[4], 3)] {
 			update_channel(&gossip_sync, &secp_ctx, key, UnsignedChannelUpdate {
+				htlc_maximum_rgb: 0,
 				chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 				short_channel_id: 2,
 				timestamp: 1,
@@ -6961,6 +7074,7 @@ mod tests {
 		add_channel(&gossip_sync, &secp_ctx, &privkeys[4], &privkeys[6], ChannelFeatures::from_le_bytes(id_to_feature_flags(1)), 1);
 		for (key, channel_flags) in [(&privkeys[4], 0), (&privkeys[6], 3)] {
 			update_channel(&gossip_sync, &secp_ctx, key, UnsignedChannelUpdate {
+				htlc_maximum_rgb: 0,
 				chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 				short_channel_id: 1,
 				timestamp: 1,
@@ -6978,7 +7092,7 @@ mod tests {
 
 		{
 			// Now ensure the route flows simply over nodes 1 and 4 to 6.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params, 10_000);
 			let route = get_route(&our_id, &route_params, &network.read_only(), None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -7023,6 +7137,7 @@ mod tests {
 		// We modify the graph to set the htlc_maximum of channel 2 to below the value we wish to
 		// send.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 2,
@@ -7037,6 +7152,7 @@ mod tests {
 		});
 
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 12,
 			timestamp: 2,
@@ -7053,7 +7169,7 @@ mod tests {
 		{
 			// Now, attempt to route 90 sats, which is exactly 90 sats at the last hop, plus the
 			// 200% fee charged channel 13 in the 1-to-2 direction.
-			let mut route_params = RouteParameters::from_payment_params_and_value(
+			let mut route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params, 90_000);
 			route_params.max_total_routing_fee_msat = Some(90_000*2);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
@@ -7097,6 +7213,7 @@ mod tests {
 		// gets an htlc_maximum_msat of 80_000 and channel 4 an htlc_minimum_msat of 90_000. We
 		// then try to send 90_000.
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 2,
@@ -7110,6 +7227,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 4,
 			timestamp: 2,
@@ -7127,7 +7245,7 @@ mod tests {
 			// Now, attempt to route 90 sats, hitting the htlc_minimum on channel 4, but
 			// overshooting the htlc_maximum on channel 2. Thus, we should pick the (absurdly
 			// expensive) channels 12-13 path.
-			let mut route_params = RouteParameters::from_payment_params_and_value(
+			let mut route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params, 90_000);
 			route_params.max_total_routing_fee_msat = Some(90_000*2);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
@@ -7172,7 +7290,7 @@ mod tests {
 		let random_seed_bytes = [42; 32];
 
 		{
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 100_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), Some(&[
 				&get_channel_details(Some(3), nodes[0], channelmanager::provided_init_features(&config), 200_000),
@@ -7186,7 +7304,7 @@ mod tests {
 			assert_eq!(route.paths[0].hops[0].fee_msat, 100_000);
 		}
 		{
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 100_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), Some(&[
 				&get_channel_details(Some(3), nodes[0], channelmanager::provided_init_features(&config), 50_000),
@@ -7214,7 +7332,7 @@ mod tests {
 			// If we have several options above the 3xpayment value threshold, we should pick the
 			// smallest of them, avoiding further fragmenting our available outbound balance to
 			// this node.
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params, 100_000);
 			let route = get_route(&our_id, &route_params, &network_graph.read_only(), Some(&[
 				&get_channel_details(Some(2), nodes[0], channelmanager::provided_init_features(&config), 50_000),
@@ -7245,7 +7363,7 @@ mod tests {
 		// Without penalizing each hop 100 msats, a longer path with lower fees is chosen.
 		let scorer = ln_test_utils::TestScorer::new();
 		let random_seed_bytes = [42; 32];
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params.clone(), 100);
 		let route = get_route( &our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -7258,7 +7376,7 @@ mod tests {
 		// Applying a 100 msat penalty to each hop results in taking channels 7 and 10 to nodes[6]
 		// from nodes[2] rather than channel 6, 11, and 8, even though the longer path is cheaper.
 		let scorer = FixedPenaltyScorer::with_penalty(100);
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, 100);
 		let route = get_route( &our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -7315,7 +7433,7 @@ mod tests {
 		// A path to nodes[6] exists when no penalties are applied to any channel.
 		let scorer = ln_test_utils::TestScorer::new();
 		let random_seed_bytes = [42; 32];
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, 100);
 		let route = get_route( &our_id, &route_params, &network_graph, None, Arc::clone(&logger),
 			&scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -7351,16 +7469,22 @@ mod tests {
 		let route = Route {
 			paths: vec![Path { hops: vec![
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 100, cltv_expiry_delta: 0, maybe_announced_channel: true,
 				},
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 150, cltv_expiry_delta: 0, maybe_announced_channel: true,
 				},
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("027f31ebc5462c1fdce1b737ecff52d37d75dea43ce11c74d25aa297165faa2007").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 225, cltv_expiry_delta: 0, maybe_announced_channel: true,
@@ -7378,22 +7502,30 @@ mod tests {
 		let route = Route {
 			paths: vec![Path { hops: vec![
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 100, cltv_expiry_delta: 0, maybe_announced_channel: true,
 				},
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 150, cltv_expiry_delta: 0, maybe_announced_channel: true,
 				},
 			], blinded_tail: None }, Path { hops: vec![
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 100, cltv_expiry_delta: 0, maybe_announced_channel: true,
 				},
 				RouteHop {
+					payment_amount: 0,
+					rgb_payment: None,
 					pubkey: PublicKey::from_slice(&<Vec<u8>>::from_hex("0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
 					short_channel_id: 0, fee_msat: 150, cltv_expiry_delta: 0, maybe_announced_channel: true,
@@ -7431,7 +7563,7 @@ mod tests {
 		let feasible_payment_params = PaymentParameters::from_node_id(nodes[6], 0).with_route_hints(last_hops(&nodes)).unwrap()
 			.with_max_total_cltv_expiry_delta(feasible_max_total_cltv_delta);
 		let random_seed_bytes = [42; 32];
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			feasible_payment_params, 100);
 		let route = get_route(&our_id, &route_params, &network_graph, None, Arc::clone(&logger),
 			&scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -7442,7 +7574,7 @@ mod tests {
 		let fail_max_total_cltv_delta = 23;
 		let fail_payment_params = PaymentParameters::from_node_id(nodes[6], 0).with_route_hints(last_hops(&nodes)).unwrap()
 			.with_max_total_cltv_expiry_delta(fail_max_total_cltv_delta);
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			fail_payment_params, 100);
 		match get_route(&our_id, &route_params, &network_graph, None, Arc::clone(&logger), &scorer,
 			&Default::default(), &random_seed_bytes)
@@ -7470,12 +7602,12 @@ mod tests {
 
 		// We should be able to find a route initially, and then after we fail a few random
 		// channels eventually we won't be able to any longer.
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params.clone(), 100);
 		assert!(get_route(&our_id, &route_params, &network_graph, None, Arc::clone(&logger),
 			&scorer, &Default::default(), &random_seed_bytes).is_ok());
 		loop {
-			let route_params = RouteParameters::from_payment_params_and_value(
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 				payment_params.clone(), 100);
 			if let Ok(route) = get_route(&our_id, &route_params, &network_graph, None,
 				Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes)
@@ -7502,16 +7634,16 @@ mod tests {
 
 		// First check we can actually create a long route on this graph.
 		let feasible_payment_params = PaymentParameters::from_node_id(nodes[18], 0);
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			feasible_payment_params, 100);
 		let route = get_route(&our_id, &route_params, &network_graph, None, Arc::clone(&logger),
 			&scorer, &Default::default(), &random_seed_bytes).unwrap();
 		let path = route.paths[0].hops.iter().map(|hop| hop.short_channel_id).collect::<Vec<_>>();
-		assert!(path.len() == MAX_PATH_LENGTH_ESTIMATE.into());
+		assert!(path.len() == usize::from(MAX_PATH_LENGTH_ESTIMATE));
 
 		// But we can't create a path surpassing the MAX_PATH_LENGTH_ESTIMATE limit.
 		let fail_payment_params = PaymentParameters::from_node_id(nodes[19], 0);
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			fail_payment_params, 100);
 		match get_route(&our_id, &route_params, &network_graph, None, Arc::clone(&logger), &scorer,
 			&Default::default(), &random_seed_bytes)
@@ -7533,7 +7665,7 @@ mod tests {
 
 		let payment_params = PaymentParameters::from_node_id(nodes[6], 42).with_route_hints(last_hops(&nodes)).unwrap();
 		let random_seed_bytes = [42; 32];
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params.clone(), 100);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -7570,7 +7702,7 @@ mod tests {
 		let payment_params = PaymentParameters::from_node_id(nodes[3], 0);
 		let random_seed_bytes = [42; 32];
 
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params.clone(), 100);
 		let mut route = get_route(&our_id, &route_params, &network_graph, None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -7636,7 +7768,7 @@ mod tests {
 		let random_seed_bytes = [42; 32];
 		let payment_params = PaymentParameters::from_node_id(nodes[3], 0);
 		let hops = [nodes[1], nodes[2], nodes[4], nodes[3]];
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 100);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100);
 		let route = build_route_from_hops_internal(&our_id, &hops, &route_params, &network_graph,
 			Arc::clone(&logger), &random_seed_bytes).unwrap();
 		let route_hop_pubkeys = route.paths[0].hops.iter().map(|hop| hop.pubkey).collect::<Vec<_>>();
@@ -7657,6 +7789,7 @@ mod tests {
 		// Set the fee on channel 13 to 0% to match channel 4 giving us two equivalent paths (us
 		// -> node 7 -> node2 and us -> node 1 -> node 2) which we should balance over.
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 4,
 			timestamp: 2,
@@ -7670,6 +7803,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[7], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 13,
 			timestamp: 2,
@@ -7693,7 +7827,7 @@ mod tests {
 		// applying max_channel_saturation_power_of_half. This value also ensures the cost of paths
 		// considered when applying max_channel_saturation_power_of_half is less than the cost of
 		// those when it is not applied.
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, 75_000_000);
 		let route = get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &ProbabilisticScoringFeeParameters::default(), &random_seed_bytes).unwrap();
@@ -7800,7 +7934,7 @@ mod tests {
 
 		// Then check we can get a normal route
 		let payment_params = PaymentParameters::from_node_id(nodes[10], 42);
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, 100);
 		let route = get_route(&our_id, &route_params, &network_graph, None,
 			Arc::clone(&logger), &scorer, &scorer_params, &random_seed_bytes);
@@ -7831,6 +7965,7 @@ mod tests {
 
 		let max_htlc_msat = 50_000;
 		let route_hint_1 = RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[2],
 			short_channel_id: 42,
 			fees: RoutingFees {
@@ -7849,7 +7984,7 @@ mod tests {
 
 		// Make sure we'll error if our route hints don't have enough liquidity according to their
 		// htlc_maximum_msat.
-		let mut route_params = RouteParameters::from_payment_params_and_value(
+		let mut route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, max_htlc_msat + 1);
 		route_params.max_total_routing_fee_msat = None;
 		if let Err(err) = get_route(&our_id,
@@ -7866,7 +8001,7 @@ mod tests {
 			.with_route_hints(vec![route_hint_1, route_hint_2]).unwrap()
 			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
 			.unwrap();
-		let mut route_params = RouteParameters::from_payment_params_and_value(
+		let mut route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, max_htlc_msat + 1);
 		route_params.max_total_routing_fee_msat = Some(max_htlc_msat * 2);
 		let route = get_route(&our_id, &route_params, &netgraph, None, Arc::clone(&logger),
@@ -7894,6 +8029,7 @@ mod tests {
 		let amt_msat = 900_000;
 		let max_htlc_msat = 500_000;
 		let route_hint_1 = RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: intermed_node_id,
 			short_channel_id: 44,
 			fees: RoutingFees {
@@ -7904,6 +8040,7 @@ mod tests {
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: Some(max_htlc_msat),
 		}, RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: intermed_node_id,
 			short_channel_id: 45,
 			fees: RoutingFees {
@@ -7924,7 +8061,7 @@ mod tests {
 			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
 			.unwrap();
 
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, amt_msat);
 		let route = get_route(&our_node_id, &route_params, &network_graph.read_only(),
 			Some(&first_hop.iter().collect::<Vec<_>>()), Arc::clone(&logger), &scorer,
@@ -7962,7 +8099,7 @@ mod tests {
 		let payment_params = PaymentParameters::blinded(vec![
 			blinded_path.clone(), blinded_path.clone()
 		]).with_bolt12_features(bolt12_features).unwrap();
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, amt_msat);
 		let route = get_route(&our_node_id, &route_params, &network_graph.read_only(),
 			Some(&first_hops.iter().collect::<Vec<_>>()), Arc::clone(&logger), &scorer,
@@ -7979,6 +8116,8 @@ mod tests {
 		// (De)serialize a Route with 1 blinded path out of two total paths.
 		let mut route = Route { paths: vec![Path {
 			hops: vec![RouteHop {
+				payment_amount: 0,
+				rgb_payment: None,
 				pubkey: ln_test_utils::pubkey(50),
 				node_features: NodeFeatures::empty(),
 				short_channel_id: 42,
@@ -7998,6 +8137,8 @@ mod tests {
 				final_value_msat: 100,
 			})}, Path {
 			hops: vec![RouteHop {
+				payment_amount: 0,
+				rgb_payment: None,
 				pubkey: ln_test_utils::pubkey(51),
 				node_features: NodeFeatures::empty(),
 				short_channel_id: 43,
@@ -8038,6 +8179,8 @@ mod tests {
 		let mut inflight_htlcs = InFlightHtlcs::new();
 		let path = Path {
 			hops: vec![RouteHop {
+				payment_amount: 0,
+				rgb_payment: None,
 				pubkey: ln_test_utils::pubkey(42),
 				node_features: NodeFeatures::empty(),
 				short_channel_id: 42,
@@ -8047,6 +8190,8 @@ mod tests {
 				maybe_announced_channel: false,
 			},
 			RouteHop {
+				payment_amount: 0,
+				rgb_payment: None,
 				pubkey: ln_test_utils::pubkey(43),
 				node_features: NodeFeatures::empty(),
 				short_channel_id: 43,
@@ -8074,6 +8219,8 @@ mod tests {
 		// Make sure we add a shadow offset when sending to blinded paths.
 		let mut route = Route { paths: vec![Path {
 			hops: vec![RouteHop {
+				payment_amount: 0,
+				rgb_payment: None,
 				pubkey: ln_test_utils::pubkey(42),
 				node_features: NodeFeatures::empty(),
 				short_channel_id: 42,
@@ -8083,6 +8230,8 @@ mod tests {
 				maybe_announced_channel: false,
 			},
 			RouteHop {
+				payment_amount: 0,
+				rgb_payment: None,
 				pubkey: ln_test_utils::pubkey(43),
 				node_features: NodeFeatures::empty(),
 				short_channel_id: 43,
@@ -8154,7 +8303,7 @@ mod tests {
 		let decoded_params: PaymentParameters = ReadableArgs::read(&mut reader, 42).unwrap();
 		assert_eq!(payment_params, decoded_params);
 
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, 1001);
 		let route = get_route(&our_id, &route_params, &network_graph, None, Arc::clone(&logger),
 			&scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -8205,7 +8354,7 @@ mod tests {
 		let invalid_blinded_path_3 = dummy_one_hop_blinded_path(nodes[3], blinded_payinfo.clone());
 		let payment_params = PaymentParameters::blinded(vec![
 			invalid_blinded_path_2, invalid_blinded_path_3]);
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 1001);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 1001);
 		match get_route(&our_id, &route_params, &network_graph, None, Arc::clone(&logger),
 			&scorer, &Default::default(), &random_seed_bytes)
 		{
@@ -8217,7 +8366,7 @@ mod tests {
 
 		let invalid_blinded_path = dummy_blinded_path(our_id, blinded_payinfo.clone());
 		let payment_params = PaymentParameters::blinded(vec![invalid_blinded_path]);
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 1001);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 1001);
 		match get_route(&our_id, &route_params, &network_graph, None, Arc::clone(&logger), &scorer,
 			&Default::default(), &random_seed_bytes)
 		{
@@ -8230,7 +8379,7 @@ mod tests {
 		let mut invalid_blinded_path = dummy_one_hop_blinded_path(ln_test_utils::pubkey(46), blinded_payinfo);
 		invalid_blinded_path.clear_blinded_hops();
 		let payment_params = PaymentParameters::blinded(vec![invalid_blinded_path]);
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 1001);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 1001);
 		match get_route(&our_id, &route_params, &network_graph, None, Arc::clone(&logger), &scorer,
 			&Default::default(), &random_seed_bytes)
 		{
@@ -8281,7 +8430,7 @@ mod tests {
 		let payment_params = PaymentParameters::blinded(blinded_hints.clone())
 			.with_bolt12_features(bolt12_features).unwrap();
 
-		let mut route_params = RouteParameters::from_payment_params_and_value(payment_params, 100_000);
+		let mut route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 100_000);
 		route_params.max_total_routing_fee_msat = Some(100_000);
 		let route = get_route(&our_id, &route_params, &network_graph, None, Arc::clone(&logger),
 			&scorer, &Default::default(), &random_seed_bytes).unwrap();
@@ -8323,6 +8472,7 @@ mod tests {
 		add_channel(&gossip_sync, &secp_ctx, &privkeys[0], &privkeys[1],
 			ChannelFeatures::from_le_bytes(id_to_feature_flags(1)), 1);
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 1,
@@ -8336,6 +8486,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 1,
@@ -8366,7 +8517,7 @@ mod tests {
 		let payment_params = PaymentParameters::blinded(blinded_hints.clone());
 
 		let netgraph = network_graph.read_only();
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params.clone(), amt_msat);
 		if let Err(err) = get_route(&nodes[0], &route_params, &netgraph,
 			Some(&first_hops.iter().collect::<Vec<_>>()), Arc::clone(&logger), &scorer,
@@ -8376,7 +8527,7 @@ mod tests {
 
 		// Sending an exact amount accounting for the blinded path fee works.
 		let amt_minus_blinded_path_fee = amt_msat - blinded_payinfo.fee_base_msat as u64;
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, amt_minus_blinded_path_fee);
 		let route = get_route(&nodes[0], &route_params, &netgraph,
 			Some(&first_hops.iter().collect::<Vec<_>>()), Arc::clone(&logger), &scorer,
@@ -8436,7 +8587,7 @@ mod tests {
 			.with_bolt12_features(bolt12_features).unwrap();
 
 		let netgraph = network_graph.read_only();
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, amt_msat);
 		let route = get_route(&nodes[0], &route_params, &netgraph,
 			Some(&first_hops.iter().collect::<Vec<_>>()), Arc::clone(&logger), &scorer,
@@ -8478,7 +8629,7 @@ mod tests {
 			.with_bolt12_features(bolt12_features.clone()).unwrap();
 
 		let netgraph = network_graph.read_only();
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, amt_msat);
 		if let Err(err) = get_route(
 			&our_id, &route_params, &netgraph, None, Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes
@@ -8526,7 +8677,7 @@ mod tests {
 			.with_bolt12_features(bolt12_features.clone()).unwrap();
 
 		let netgraph = network_graph.read_only();
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, amt_msat);
 		if let Err(err) = get_route(
 			&our_id, &route_params, &netgraph, None, Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes
@@ -8579,6 +8730,7 @@ mod tests {
 				.with_bolt12_features(bolt12_features.clone()).unwrap()
 		} else {
 			let route_hint = RouteHint(vec![RouteHintHop {
+				htlc_maximum_rgb: None,
 				src_node_id: nodes[0],
 				short_channel_id: 42,
 				fees: RoutingFees {
@@ -8596,7 +8748,7 @@ mod tests {
 		};
 
 		let netgraph = network_graph.read_only();
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, amt_msat);
 		if let Err(err) = get_route(
 			&our_id, &route_params, &netgraph, Some(&first_hops.iter().collect::<Vec<_>>()),
@@ -8658,6 +8810,7 @@ mod tests {
 			let mut route_hints = Vec::new();
 			for (idx, (base_fee, htlc_min)) in base_fees.iter().zip(htlc_mins.iter()).enumerate() {
 				route_hints.push(RouteHint(vec![RouteHintHop {
+					htlc_maximum_rgb: None,
 					src_node_id: nodes[0],
 					short_channel_id: 42 + idx as u64,
 					fees: RoutingFees {
@@ -8675,7 +8828,7 @@ mod tests {
 		};
 
 		let netgraph = network_graph.read_only();
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, amt_msat);
 
 		let route = get_route(
@@ -8711,6 +8864,7 @@ mod tests {
 
 		add_channel(&gossip_sync, &secp_ctx, &privkeys[0], &privkeys[6], ChannelFeatures::from_le_bytes(id_to_feature_flags(6)), 6);
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 6,
 			timestamp: 1,
@@ -8739,7 +8893,7 @@ mod tests {
 		let bolt12_features = channelmanager::provided_bolt12_invoice_features(&config);
 		let payment_params = PaymentParameters::blinded(blinded_hints.clone())
 			.with_bolt12_features(bolt12_features.clone()).unwrap();
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, amt_msat);
 		let netgraph = network_graph.read_only();
 
@@ -8795,7 +8949,7 @@ mod tests {
 		};
 
 		let netgraph = network_graph.read_only();
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, amt_msat);
 		let route = get_route(
 			&our_id, &route_params, &netgraph, Some(&first_hops.iter().collect::<Vec<_>>()),
@@ -8825,6 +8979,7 @@ mod tests {
 		add_channel(&gossip_sync, &secp_ctx, &our_privkey, &privkeys[0],
 			ChannelFeatures::from_le_bytes(id_to_feature_flags(1)), 1);
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 1,
@@ -8838,6 +8993,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 1,
@@ -8854,6 +9010,7 @@ mod tests {
 		add_channel(&gossip_sync, &secp_ctx, &privkeys[0], &privkeys[1],
 			ChannelFeatures::from_le_bytes(id_to_feature_flags(1)), 2);
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 2,
@@ -8867,6 +9024,7 @@ mod tests {
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 2,
 			timestamp: 2,
@@ -8883,6 +9041,7 @@ mod tests {
 		let dest_node_id = nodes[2];
 
 		let route_hint = RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: our_node_id,
 			short_channel_id: 44,
 			fees: RoutingFees {
@@ -8894,6 +9053,7 @@ mod tests {
 			htlc_maximum_msat: Some(5_000_000),
 		},
 		RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: nodes[0],
 			short_channel_id: 45,
 			fees: RoutingFees {
@@ -8908,7 +9068,7 @@ mod tests {
 		let payment_params = PaymentParameters::from_node_id(dest_node_id, 42)
 			.with_route_hints(vec![route_hint]).unwrap()
 			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config)).unwrap();
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, amt_msat);
 
 		// First create an insufficient first hop for channel with SCID 1 and check we'd use the
@@ -8970,6 +9130,7 @@ mod tests {
 
 		// Enable channel 1, setting max HTLC to 1M sats
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 2,
@@ -8985,6 +9146,7 @@ mod tests {
 
 		// Set the fee on channel 3 to zero
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 3,
 			timestamp: 2,
@@ -9000,6 +9162,7 @@ mod tests {
 
 		// Set the fee on channel 6 to 1 millionth
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 6,
 			timestamp: 2,
@@ -9020,12 +9183,13 @@ mod tests {
 		let payment_params = PaymentParameters::from_node_id(nodes[4], 42)
 			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config))
 			.unwrap();
-		let route_params = RouteParameters::from_payment_params_and_value(payment_params, 1_000_000);
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 1_000_000);
 		get_route(&our_id, &route_params, &network_graph.read_only(), None,
 			Arc::clone(&logger), &scorer, &Default::default(), &random_seed_bytes).unwrap_err();
 
 		// Now set channel 1 max HTLC to 1M + 1 sats
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 3,
@@ -9070,6 +9234,7 @@ mod tests {
 		];
 
 		let route_hint = RouteHint(vec![RouteHintHop {
+			htlc_maximum_rgb: None,
 			src_node_id: our_node_id,
 			short_channel_id: 44,
 			fees: RoutingFees {
@@ -9085,7 +9250,7 @@ mod tests {
 			.with_route_hints(vec![route_hint]).unwrap()
 			.with_bolt11_features(channelmanager::provided_bolt11_invoice_features(&config)).unwrap();
 
-		let route_params = RouteParameters::from_payment_params_and_value(
+		let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 			payment_params, amt_msat);
 
 
@@ -9118,6 +9283,7 @@ mod tests {
 
 		// Enable channel 1
 		let update_1 = UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 1,
 			timestamp: 2,
@@ -9134,6 +9300,7 @@ mod tests {
 
 		// Set the fee on channel 3 to 1 sat, max HTLC to 1M msat
 		let update_3 = UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 3,
 			timestamp: 2,
@@ -9150,6 +9317,7 @@ mod tests {
 
 		// Set the fee on channel 13 to 1 sat, max HTLC to 1M msat
 		let update_13 = UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 13,
 			timestamp: 2,
@@ -9166,6 +9334,7 @@ mod tests {
 
 		// Set the fee on channel 4 to 1 sat, max HTLC to 1M msat
 		let update_4 = UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 4,
 			timestamp: 2,
@@ -9193,6 +9362,7 @@ mod tests {
 
 			// Set the fee on channel 16 to 2 sats, max HTLC to 3M msat
 			let update_a = UnsignedChannelUpdate {
+				htlc_maximum_rgb: 0,
 				chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 				short_channel_id: i + 42,
 				timestamp: 2,
@@ -9209,6 +9379,7 @@ mod tests {
 
 			// Enable channel 16 by providing an update in both directions
 			let update_b = UnsignedChannelUpdate {
+				htlc_maximum_rgb: 0,
 				chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 				short_channel_id: i + 42,
 				timestamp: 2,
@@ -9231,7 +9402,7 @@ mod tests {
 			.unwrap();
 		payment_params.max_channel_saturation_power_of_half = 0;
 		let route_params =
-			RouteParameters::from_payment_params_and_value(payment_params, 3_000_000);
+			RouteParameters::from_payment_params_and_value_without_rgb(payment_params, 3_000_000);
 		let route = get_route(
 			&our_id,
 			&route_params,
@@ -9255,6 +9426,7 @@ mod tests {
 
 		// Set the fee on channel 16 to 2 sats, max HTLC to 3M msat
 		let update_16_a = UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 16,
 			timestamp: 2,
@@ -9271,6 +9443,7 @@ mod tests {
 
 		// Enable channel 16 by providing an update in both directions
 		let update_16_b = UnsignedChannelUpdate {
+			htlc_maximum_rgb: 0,
 			chain_hash: ChainHash::using_genesis_block(Network::Testnet),
 			short_channel_id: 16,
 			timestamp: 2,
@@ -9396,6 +9569,8 @@ pub(crate) mod bench_utils {
 	pub(crate) fn first_hop(node_id: PublicKey) -> ChannelDetails {
 		#[allow(deprecated)] // TODO: Remove once balance_msat is removed.
 		ChannelDetails {
+			inbound_htlc_maximum_rgb: 0,
+			next_outbound_htlc_limit_rgb: 0,
 			channel_id: ChannelId::new_zero(),
 			counterparty: ChannelCounterparty {
 				features: channelmanager::provided_init_features(&UserConfig::default()),
@@ -9470,7 +9645,7 @@ pub(crate) mod bench_utils {
 					.with_bolt11_features(features.clone()).unwrap();
 				let first_hop = first_hop(src);
 				let amt_msat = starting_amount + seed % 1_000_000;
-				let route_params = RouteParameters::from_payment_params_and_value(
+				let route_params = RouteParameters::from_payment_params_and_value_without_rgb(
 					params.clone(), amt_msat);
 				let path_exists =
 					get_route(&payer, &route_params, &graph.read_only(), Some(&[&first_hop]),
@@ -9612,11 +9787,10 @@ pub mod benches {
 		let mut idx = 0;
 		bench.bench_function(bench_name, |b| b.iter(|| {
 			let (first_hop, params, amt) = &route_endpoints[idx % route_endpoints.len()];
-			let route_params = RouteParameters::from_payment_params_and_value(params.clone(), *amt);
+			let route_params = RouteParameters::from_payment_params_and_value_without_rgb(params.clone(), *amt);
 			assert!(get_route(&payer, &route_params, &graph.read_only(), Some(&[first_hop]),
 				&DummyLogger{}, &scorer, score_params, &random_seed_bytes).is_ok());
 			idx += 1;
 		}));
 	}
 }
-*/

@@ -1173,14 +1173,18 @@ pub fn test_manually_accept_inbound_channel_request() {
 	expect_channel_pending_event(&nodes[1], &node_a_id);
 
 	let funding_signed = get_event_msg!(nodes[1], MessageSendEvent::SendFundingSigned, node_a_id);
+	assert_eq!(nodes[0].node.list_channels().len(), 1);
+	assert!(nodes[0].node.list_funded_channels().is_empty());
+	assert_eq!(nodes[1].node.list_funded_channels().len(), 1);
 	nodes[0].node.handle_funding_signed(node_b_id, &funding_signed);
 	check_added_monitors(&nodes[0], 1);
+	assert_eq!(nodes[0].node.list_funded_channels().len(), 1);
 	let events = &nodes[0].node.get_and_clear_pending_events();
 	assert_eq!(events.len(), 2);
 	match &events[0] {
 		crate::events::Event::FundingTxBroadcastSafe { funding_txo, .. } => {
 			assert_eq!(funding_txo.txid, funding_outpoint.txid);
-			assert_eq!(funding_txo.vout, funding_outpoint.index.into());
+			assert_eq!(funding_txo.vout, u32::from(funding_outpoint.index));
 		},
 		_ => panic!("Unexpected event"),
 	};
@@ -2502,7 +2506,7 @@ pub fn test_funding_signed_event() {
 	match &events[0] {
 		crate::events::Event::FundingTxBroadcastSafe { funding_txo, .. } => {
 			assert_eq!(funding_txo.txid, funding_outpoint.txid);
-			assert_eq!(funding_txo.vout, funding_outpoint.index.into());
+			assert_eq!(funding_txo.vout, u32::from(funding_outpoint.index));
 		},
 		_ => panic!("Unexpected event"),
 	};

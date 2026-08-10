@@ -1423,11 +1423,10 @@ impl InMemorySigner {
 		funding_key: SecretKey, revocation_base_key: SecretKey, payment_key_v1: SecretKey,
 		payment_key_v2: SecretKey, v2_remote_key_derivation: bool,
 		delayed_payment_base_key: SecretKey, htlc_base_key: SecretKey, commitment_seed: [u8; 32],
-		channel_keys_id: [u8; 32], ldk_data_dir: PathBuf, rand_bytes_unique_start: [u8; 32],
-		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
+		channel_keys_id: [u8; 32], rand_bytes_unique_start: [u8; 32],
 	) -> InMemorySigner {
-		InMemorySigner {
-			funding_key: sealed::MaybeTweakedSecretKey::from(funding_key),
+		Self::new_with_rgb(
+			funding_key,
 			revocation_base_key,
 			payment_key_v1,
 			payment_key_v2,
@@ -1436,14 +1435,17 @@ impl InMemorySigner {
 			htlc_base_key,
 			commitment_seed,
 			channel_keys_id,
-			entropy_source: RandomBytes::new(rand_bytes_unique_start),
-			ldk_data_dir,
-			rgb_kv_store,
-		}
+			PathBuf::from("/tmp/ldk_test"),
+			rand_bytes_unique_start,
+			Arc::new(crate::util::test_utils::TestStore::new(false)),
+		)
 	}
 
-	#[cfg(not(any(feature = "_test_utils", test)))]
-	fn new(
+	/// Constructs an in-memory channel signer backed by the supplied RGB key-value store.
+	///
+	/// `ldk_data_dir` contains the node's persisted RGB state. Callers must provide the same
+	/// directory and store when reconstructing a signer for an existing channel.
+	pub fn new_with_rgb(
 		funding_key: SecretKey, revocation_base_key: SecretKey, payment_key_v1: SecretKey,
 		payment_key_v2: SecretKey, v2_remote_key_derivation: bool,
 		delayed_payment_base_key: SecretKey, htlc_base_key: SecretKey, commitment_seed: [u8; 32],
@@ -2420,7 +2422,7 @@ impl KeysManager {
 		let payment_key_v2_idx =
 			u64::from_le_bytes(commitment_seed[..8].try_into().expect("8 bytes"));
 
-		InMemorySigner::new(
+		InMemorySigner::new_with_rgb(
 			funding_key,
 			revocation_base_key,
 			payment_key_v1,

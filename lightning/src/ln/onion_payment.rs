@@ -740,7 +740,7 @@ mod tests {
 			blinded_tail: None,
 		};
 
-		let (onion, amount_msat, cltv_expiry) = create_payment_onion(
+		let (onion, amount_msat, cltv_expiry, _) = create_payment_onion(
 			&secp_ctx, &path, &session_priv, total_amt_msat, &recipient_onion,
 			cur_height, &payment_hash, &Some(preimage), None, prng_seed
 		).unwrap();
@@ -780,6 +780,7 @@ mod tests {
 		onion_routing_packet: msgs::OnionPacket,
 	) -> msgs::UpdateAddHTLC {
 		msgs::UpdateAddHTLC {
+			rgb_payment: None,
 			channel_id: ChannelId::from_bytes([0; 32]),
 			htlc_id: 0,
 			amount_msat,
@@ -814,6 +815,8 @@ mod tests {
 		let recipient_amount = total_amt_msat - hop_fee;
 		let hops = vec![
 			RouteHop {
+				payment_amount: 0,
+				rgb_payment: None,
 				pubkey: hop_pk,
 				fee_msat: hop_fee,
 				cltv_expiry_delta: MIN_CLTV_EXPIRY_DELTA as u32,
@@ -823,6 +826,8 @@ mod tests {
 				maybe_announced_channel: false,
 			},
 			RouteHop {
+				payment_amount: 0,
+				rgb_payment: None,
 				pubkey: recipient_pk,
 				fee_msat: recipient_amount,
 				cltv_expiry_delta: TEST_FINAL_CLTV,

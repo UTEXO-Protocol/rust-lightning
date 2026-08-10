@@ -15,7 +15,7 @@ pub(crate) mod fuzz_wrappers;
 #[macro_use]
 pub mod ser_macros;
 
-#[cfg(any(test, feature = "_test_utils"))]
+#[cfg(any(test, feature = "_test_utils", feature = "_rln_test_hooks"))]
 pub mod mut_global;
 
 pub mod anchor_channel_reserves;

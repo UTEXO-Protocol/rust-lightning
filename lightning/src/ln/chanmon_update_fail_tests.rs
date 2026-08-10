@@ -5108,7 +5108,8 @@ fn test_mpp_claim_to_holding_cell() {
 	let onion = RecipientOnionFields::secret_only(payment_secret_2);
 	let id = PaymentId([42; 32]);
 	let pay_params = PaymentParameters::from_node_id(node_d_id, TEST_FINAL_CLTV);
-	let route_params = RouteParameters::from_payment_params_and_value(pay_params, 400_000);
+	let route_params =
+		RouteParameters::from_payment_params_and_value_without_rgb(pay_params, 400_000);
 	nodes[2].node.send_payment(paymnt_hash_2, onion, id, route_params, Retry::Attempts(0)).unwrap();
 	check_added_monitors(&nodes[2], 1);
 
