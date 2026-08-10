@@ -533,8 +533,7 @@ impl KVStore for FilesystemStore {
 
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, lightning::io::Error>> + 'static + Send>>
-	{
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, lightning::io::Error>> + 'static + Send>> {
 		let this = Arc::clone(&self.inner);
 
 		let path = match this.get_checked_dest_file_path(

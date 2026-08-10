@@ -419,8 +419,7 @@ impl<
 		L,
 		AsyncPersister<K, S, L, ES, SP, T, F>,
 		ES,
-	>
-where
+	> where
 	K::Target: KVStore + MaybeSync,
 	SP::Target: SignerProvider + Sized,
 	C::Target: chain::Filter,

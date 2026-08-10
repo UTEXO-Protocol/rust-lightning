@@ -259,8 +259,7 @@ impl<
 		G,
 		&'a (dyn UtxoLookup + Send + Sync),
 		L,
-	>
-where
+	> where
 	L::Target: Logger,
 {
 	/// Initializes a new [`GossipSync::Rapid`] variant.
@@ -277,8 +276,7 @@ impl<'a, L: Deref>
 		&'a NetworkGraph<L>,
 		&'a (dyn UtxoLookup + Send + Sync),
 		L,
-	>
-where
+	> where
 	L::Target: Logger,
 {
 	/// Initializes a new [`GossipSync::None`] variant.

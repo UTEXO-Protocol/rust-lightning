@@ -287,6 +287,7 @@ pub const COMMITMENT_TX_WEIGHT_PER_HTLC: u64 = 172;
 pub(crate) const RGB_COMMITMENT_TX_OUTPUT_WEIGHT: u64 = 172;
 
 #[rustfmt::skip]
+#[cfg(any(test, feature = "_test_utils"))]
 pub(crate) fn commitment_tx_base_weight(channel_type_features: &ChannelTypeFeatures) -> u64 {
 	commitment_tx_base_weight_with_rgb(channel_type_features, false)
 }
@@ -302,6 +303,7 @@ pub(crate) fn commitment_tx_base_weight_with_rgb(channel_type_features: &Channel
 /// Get the fee cost of a commitment tx with a given number of HTLC outputs.
 /// Note that num_htlcs should not include dust HTLCs.
 #[rustfmt::skip]
+#[cfg(any(test, feature = "_test_utils"))]
 pub(crate) fn commit_tx_fee_sat(feerate_per_kw: u32, num_htlcs: usize, channel_type_features: &ChannelTypeFeatures) -> u64 {
 	commit_tx_fee_sat_with_rgb(feerate_per_kw, num_htlcs, channel_type_features, false)
 }
