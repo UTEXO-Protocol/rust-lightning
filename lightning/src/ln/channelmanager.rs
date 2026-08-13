@@ -216,6 +216,29 @@ pub static DROP_FUNDING_SIGNED_ON_NODE: MutGlobal<Option<PublicKey>> = MutGlobal
 #[cfg(any(test, feature = "_rln_test_hooks"))]
 pub static ABORT_NEXT_RGB_FUNDING_AFTER_PREPARE: AtomicBool = AtomicBool::new(false);
 
+#[cfg(all(feature = "_rln_test_hooks", feature = "std"))]
+fn pause_after_rgb_funding_promotion(
+	temporary_channel_id: &ChannelId, funding_txid: &bitcoin::Txid,
+) {
+	use std::io::Write;
+	use std::net::TcpStream;
+
+	const CHECKPOINT_ADDRESS_ENV: &str = "RLN_TEST_RGB_FUNDING_PROMOTED_CHECKPOINT";
+	let Ok(checkpoint_address) = std::env::var(CHECKPOINT_ADDRESS_ENV) else { return };
+
+	let mut stream = TcpStream::connect(&checkpoint_address)
+		.expect("test checkpoint listener must accept the RGB funding promotion notification");
+	writeln!(stream, "{} {funding_txid}", temporary_channel_id)
+		.expect("test checkpoint notification must be written");
+	stream.flush().expect("test checkpoint notification must be flushed");
+
+	// The controller normally terminates the process after this notification. A release byte keeps
+	// cleanup deterministic when a test fails before issuing the kill.
+	let mut release = [0_u8; 1];
+	std::io::Read::read_exact(&mut stream, &mut release)
+		.expect("test checkpoint must be released or the process terminated");
+}
+
 // We hold various information about HTLC relay in the HTLC objects in Channel itself:
 //
 // Upon receipt of an HTLC from a peer, we'll give it a PendingHTLCStatus indicating if it should
@@ -10934,7 +10957,14 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 		}
 		let promoted_acceptance_key = if let Some(acceptance) = prepared_acceptance.take() {
 			match promote_funding(acceptance, self.rgb_kv_store.as_ref()) {
-				Ok(key) => Some(key),
+				Ok(key) => {
+					#[cfg(all(feature = "_rln_test_hooks", feature = "std"))]
+					pause_after_rgb_funding_promotion(
+						&msg.temporary_channel_id,
+						&msg.funding_txid,
+					);
+					Some(key)
+				},
 				Err(error) => {
 					let mut channel = Channel::from(inbound_chan);
 					let funding_txo = OutPoint { txid: msg.funding_txid, index: msg.funding_output_index };
