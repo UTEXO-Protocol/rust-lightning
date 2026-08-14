@@ -56,7 +56,7 @@ amplify = "4.8"
 bincode = "1.3"
 rgb-strict-encoding = "1.0.1"
 futures = "0.3"
-rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", rev = "d7d9b230cb5c1d989b2cdd92eed966290d9ac00f", features = [
+rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", rev = "b33aac2188c386a2addc8feb1a99663033c32c07", features = [
     "electrum",
     "esplora",
 ] }
