@@ -807,11 +807,16 @@ pub(crate) fn handle_funding(
 		_ => unreachable!("unsupported schema"),
 	};
 	let push_amount = push_asset_amount.unwrap_or(0);
+	let remote_rgb_amount = channel_rgb_amount.checked_sub(push_amount).ok_or_else(|| {
+		ChannelError::close(format!(
+			"push_asset_amount {push_amount} exceeds channel asset amount {channel_rgb_amount}"
+		))
+	})?;
 	let rgb_info = RgbInfo {
 		contract_id: consignment.contract_id(),
 		schema: AssetSchema::from_schema_id(consignment.schema_id()).unwrap(),
 		local_rgb_amount: push_amount,
-		remote_rgb_amount: channel_rgb_amount - push_amount,
+		remote_rgb_amount,
 		batch_transfer_idx: None,
 		// only meaningful on the initiator side, which is the one that sends media
 		counterparty_knows_asset: false,
