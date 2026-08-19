@@ -1119,9 +1119,9 @@ impl fmt::Display for ChannelInfo {
 			f,
 			"features: {}, node_one: {}, one_to_two: {:?}, node_two: {}, two_to_one: {:?}",
 			log_bytes!(self.features.encode()),
-			&self.node_one,
+			self.node_one,
 			self.one_to_two,
-			&self.node_two,
+			self.node_two,
 			self.two_to_one
 		)?;
 		Ok(())
@@ -1748,7 +1748,7 @@ where
 		}
 		writeln!(f, "[Nodes]")?;
 		for (&node_id, val) in self.nodes.read().unwrap().unordered_iter() {
-			writeln!(f, " {}: {}", &node_id, val)?;
+			writeln!(f, " {}: {}", node_id, val)?;
 		}
 		Ok(())
 	}
@@ -2209,7 +2209,7 @@ where
 				|| removed_nodes.contains_key(&msg.node_id_2)
 			{
 				return Err(LightningError{
-					err: format!("Channel with SCID {} or one of its nodes was removed from our network graph recently", &msg.short_channel_id),
+					err: format!("Channel with SCID {} or one of its nodes was removed from our network graph recently", msg.short_channel_id),
 					action: ErrorAction::IgnoreAndLog(Level::Gossip)});
 			}
 		}

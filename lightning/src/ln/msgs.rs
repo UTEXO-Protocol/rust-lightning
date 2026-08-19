@@ -31,7 +31,7 @@ use bitcoin::secp256k1::ecdsa::Signature;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{secp256k1, Transaction, Witness};
 
-use rgb_lib::{ContractId, RgbTransport};
+use rgb_lib::ContractId;
 
 use crate::blinded_path::message::BlindedMessagePath;
 use crate::blinded_path::payment::{
@@ -246,8 +246,6 @@ pub struct CommonOpenChannelFields {
 	/// The channel type that this channel will represent. As defined in the latest
 	/// specification, this field is required. However, it is an `Option` for legacy reasons.
 	pub channel_type: Option<ChannelTypeFeatures>,
-	/// The consignment endpoint used to exchange the RGB consignment
-	pub consignment_endpoint: Option<RgbTransport>,
 }
 
 impl CommonOpenChannelFields {
@@ -298,8 +296,9 @@ pub struct OpenChannel {
 	pub push_msat: u64,
 	/// The minimum value unencumbered by HTLCs for the counterparty to keep in the channel
 	pub channel_reserve_satoshis: u64,
-	/// The amount of RGB assets to push to the counterparty as part of the open.
-	pub push_asset_amount: Option<u64>,
+	/// The RGB asset this channel is for, if it is a colored channel: the contract ID of the asset
+	/// plus the amount of it to push to the counterparty as part of the open, if any.
+	pub rgb_asset: Option<(ContractId, Option<u64>)>,
 }
 
 /// An [`open_channel2`] message to be sent by or received from the channel initiator.
@@ -378,6 +377,9 @@ pub struct AcceptChannel {
 	pub common_fields: CommonAcceptChannelFields,
 	/// The minimum value unencumbered by HTLCs for the counterparty to keep in the channel
 	pub channel_reserve_satoshis: u64,
+	/// Whether we already know the RGB asset offered in [`OpenChannel::contract_id`], i.e. we hold
+	/// its contract and every media file it declares.
+	pub known_asset: bool,
 	#[cfg(taproot)]
 	/// Next nonce the channel initiator should use to create a funding output signature against
 	pub next_local_nonce: Option<musig2::types::PublicNonce>,
@@ -2663,15 +2665,18 @@ impl Writeable for AcceptChannel {
 		self.common_fields.delayed_payment_basepoint.write(w)?;
 		self.common_fields.htlc_basepoint.write(w)?;
 		self.common_fields.first_per_commitment_point.write(w)?;
+		let known_asset_marker = if self.known_asset { Some(()) } else { None };
 		#[cfg(not(taproot))]
 		encode_tlv_stream!(w, {
 			(0, self.common_fields.shutdown_scriptpubkey.as_ref().map(|s| WithoutLength(s)), option), // Don't encode length twice.
 			(1, self.common_fields.channel_type, option),
+			(3, known_asset_marker, option),
 		});
 		#[cfg(taproot)]
 		encode_tlv_stream!(w, {
 			(0, self.common_fields.shutdown_scriptpubkey.as_ref().map(|s| WithoutLength(s)), option), // Don't encode length twice.
 			(1, self.common_fields.channel_type, option),
+			(3, known_asset_marker, option),
 			(4, self.next_local_nonce, option),
 		});
 		Ok(())
@@ -2697,10 +2702,12 @@ impl LengthReadable for AcceptChannel {
 
 		let mut shutdown_scriptpubkey: Option<ScriptBuf> = None;
 		let mut channel_type: Option<ChannelTypeFeatures> = None;
+		let mut known_asset_marker: Option<()> = None;
 		#[cfg(not(taproot))]
 		decode_tlv_stream!(r, {
 			(0, shutdown_scriptpubkey, (option, encoding: (ScriptBuf, WithoutLength))),
 			(1, channel_type, option),
+			(3, known_asset_marker, option),
 		});
 		#[cfg(taproot)]
 		let mut next_local_nonce: Option<musig2::types::PublicNonce> = None;
@@ -2708,6 +2715,7 @@ impl LengthReadable for AcceptChannel {
 		decode_tlv_stream!(r, {
 			(0, shutdown_scriptpubkey, (option, encoding: (ScriptBuf, WithoutLength))),
 			(1, channel_type, option),
+			(3, known_asset_marker, option),
 			(4, next_local_nonce, option),
 		});
 
@@ -2730,6 +2738,7 @@ impl LengthReadable for AcceptChannel {
 				channel_type,
 			},
 			channel_reserve_satoshis,
+			known_asset: known_asset_marker.is_some(),
 			#[cfg(taproot)]
 			next_local_nonce,
 		})
@@ -3135,8 +3144,7 @@ impl Writeable for OpenChannel {
 		encode_tlv_stream!(w, {
 			(0, self.common_fields.shutdown_scriptpubkey.as_ref().map(|s| WithoutLength(s)), option), // Don't encode length twice.
 			(1, self.common_fields.channel_type, option),
-			(2, self.common_fields.consignment_endpoint, option),
-			(3, self.push_asset_amount, option),
+			(3, self.rgb_asset, option),
 		});
 		Ok(())
 	}
@@ -3165,13 +3173,11 @@ impl LengthReadable for OpenChannel {
 
 		let mut shutdown_scriptpubkey: Option<ScriptBuf> = None;
 		let mut channel_type: Option<ChannelTypeFeatures> = None;
-		let mut consignment_endpoint: Option<RgbTransport> = None;
-		let mut push_asset_amount: Option<u64> = None;
+		let mut rgb_asset: Option<(ContractId, Option<u64>)> = None;
 		decode_tlv_stream!(r, {
 			(0, shutdown_scriptpubkey, (option, encoding: (ScriptBuf, WithoutLength))),
 			(1, channel_type, option),
-			(2, consignment_endpoint, option),
-			(3, push_asset_amount, option),
+			(3, rgb_asset, option),
 		});
 		Ok(OpenChannel {
 			common_fields: CommonOpenChannelFields {
@@ -3193,11 +3199,10 @@ impl LengthReadable for OpenChannel {
 				channel_flags,
 				shutdown_scriptpubkey,
 				channel_type,
-				consignment_endpoint,
 			},
 			push_msat,
 			channel_reserve_satoshis,
-			push_asset_amount,
+			rgb_asset,
 		})
 	}
 }
@@ -3227,7 +3232,6 @@ impl Writeable for OpenChannelV2 {
 			(0, self.common_fields.shutdown_scriptpubkey.as_ref().map(|s| WithoutLength(s)), option), // Don't encode length twice.
 			(1, self.common_fields.channel_type, option),
 			(2, self.require_confirmed_inputs, option),
-			(3, self.common_fields.consignment_endpoint, option),
 		});
 		Ok(())
 	}
@@ -3258,12 +3262,10 @@ impl LengthReadable for OpenChannelV2 {
 		let mut shutdown_scriptpubkey: Option<ScriptBuf> = None;
 		let mut channel_type: Option<ChannelTypeFeatures> = None;
 		let mut require_confirmed_inputs: Option<()> = None;
-		let mut consignment_endpoint: Option<RgbTransport> = None;
 		decode_tlv_stream!(r, {
 			(0, shutdown_scriptpubkey, (option, encoding: (ScriptBuf, WithoutLength))),
 			(1, channel_type, option),
 			(2, require_confirmed_inputs, option),
-			(3, consignment_endpoint, option),
 		});
 		Ok(OpenChannelV2 {
 			common_fields: CommonOpenChannelFields {
@@ -3285,35 +3287,12 @@ impl LengthReadable for OpenChannelV2 {
 				channel_flags,
 				shutdown_scriptpubkey,
 				channel_type,
-				consignment_endpoint,
 			},
 			funding_feerate_sat_per_1000_weight,
 			locktime,
 			second_per_commitment_point,
 			require_confirmed_inputs,
 		})
-	}
-}
-
-impl Readable for RgbTransport {
-	fn read<R: Read>(r: &mut R) -> Result<Self, DecodeError> {
-		let sz: usize = <u16 as Readable>::read(r)? as usize;
-		let mut consignment_endpoint_str_vec = Vec::with_capacity(sz);
-		consignment_endpoint_str_vec.resize(sz, 0);
-		r.read_exact(&mut consignment_endpoint_str_vec)?;
-		match String::from_utf8(consignment_endpoint_str_vec) {
-			Ok(s) => return Ok(RgbTransport::from_str(&s).unwrap()),
-			Err(_) => return Err(DecodeError::InvalidValue),
-		}
-	}
-}
-
-impl Writeable for RgbTransport {
-	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
-		let consignment_endpoint_str = format!("{self}");
-		(consignment_endpoint_str.len() as u16).write(w)?;
-		w.write_all(consignment_endpoint_str.as_bytes())?;
-		Ok(())
 	}
 }
 

@@ -13,6 +13,7 @@ use crate::types::payment::PaymentHash;
 use crate::util::persist::KVStoreSync;
 
 use bitcoin::blockdata::transaction::Transaction;
+use bitcoin::hashes::{sha256, Hash};
 use bitcoin::hex::DisplayHex;
 use bitcoin::psbt::{ExtractTxError, Psbt};
 use bitcoin::secp256k1::PublicKey;
@@ -22,10 +23,10 @@ use rgb_lib::{
 	keys::WitnessVersion,
 	wallet::{
 		rust_only::{AssetColoringInfo, ColoringInfo},
-		DatabaseType, OnlineOptions, SinglesigKeys, Wallet, WalletData,
+		DatabaseType, OnlineOptions, RgbWalletOpsOffline, SinglesigKeys, Wallet, WalletData,
 	},
 	AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
-	Fascia, FileContent, RgbTransfer, RgbTransport, WitnessOrd,
+	Fascia, FileContent, RgbTransfer, WitnessOrd,
 };
 use serde::{Deserialize, Serialize};
 use strict_encoding::{StrictDeserialize, StrictSerialize};
@@ -34,8 +35,9 @@ use tokio::runtime::Handle;
 use crate::io;
 use core::ops::Deref;
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -45,8 +47,6 @@ pub const STATIC_BLINDING: u64 = 777;
 pub const BITCOIN_NETWORK_FNAME: &str = "bitcoin_network";
 /// Name of the file containing the electrum URL
 pub const INDEXER_URL_FNAME: &str = "indexer_url";
-/// Name of the file containing the wallet fingerprint
-pub const WALLET_FINGERPRINT_FNAME: &str = "wallet_fingerprint";
 /// Name of the file containing the account-level xPub of the vanilla-side of the wallet
 pub const WALLET_ACCOUNT_XPUB_VANILLA_FNAME: &str = "wallet_account_xpub_vanilla";
 /// Name of the file containing the account-level xPub of the colored-side of the wallet
@@ -94,6 +94,9 @@ pub struct RgbInfo {
 	/// bincode (a positional, non-self-describing format), so the field must be
 	/// serialized unconditionally to stay in sync on read.
 	pub batch_transfer_idx: Option<i32>,
+	/// Whether the channel acceptor told us (in `accept_channel`) that it already knows the asset
+	#[serde(default)]
+	pub counterparty_knows_asset: bool,
 }
 
 /// RGB payment info
@@ -250,10 +253,18 @@ async fn _get_rgb_wallet(ldk_data_dir: &Path, kv_store: &dyn KVStoreSync) -> Wal
 	.unwrap()
 }
 
+pub(crate) fn is_asset_known(
+	contract_id: ContractId, ldk_data_dir: &Path, kv_store: &dyn KVStoreSync,
+) -> bool {
+	let handle = Handle::current();
+	let _ = handle.enter();
+	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
+	wallet.is_asset_known(contract_id).unwrap_or(false)
+}
+
 async fn _accept_transfer(
-	ldk_data_dir: &Path, funding_txid: String, consignment_endpoint: RgbTransport,
-	kv_store: &dyn KVStoreSync,
-) -> Result<(RgbTransfer, Vec<Assignment>), RgbLibError> {
+	ldk_data_dir: &Path, funding_txid: String, kv_store: &dyn KVStoreSync,
+) -> Result<(RgbTransfer, Vec<Assignment>, HashSet<String>, PathBuf), RgbLibError> {
 	let funding_vout = 1;
 	let (
 		data_dir,
@@ -264,6 +275,8 @@ async fn _accept_transfer(
 		reuse_addresses,
 	) = _get_wallet_data(ldk_data_dir, kv_store);
 	let indexer_url = _get_indexer_url(kv_store);
+	// the consignment is received from the channel counterparty over the p2p link and written to disk
+	let consignment_path = ldk_data_dir.join(format!("consignment_{funding_txid}"));
 	tokio::task::spawn_blocking(move || {
 		let mut wallet = _new_rgb_wallet(
 			data_dir,
@@ -273,17 +286,19 @@ async fn _accept_transfer(
 			master_fingerprint,
 			reuse_addresses,
 		);
-		wallet.go_online(OnlineOptions {
+		let online = wallet.go_online(OnlineOptions {
 			indexer_url,
 			skip_consistency_check: true,
 			vanilla_sync_lookback: VANILLA_SYNC_LOOKBACK,
 		})?;
-		wallet.accept_transfer(
+		let (consignment, assignments, media_digests) = wallet.accept_transfer_consignment(
+			online,
+			consignment_path,
 			funding_txid.clone(),
 			funding_vout,
-			consignment_endpoint,
 			STATIC_BLINDING,
-		)
+		)?;
+		Ok((consignment, assignments, media_digests, wallet.get_media_dir()))
 	})
 	.await
 	.unwrap()
@@ -712,20 +727,21 @@ pub(crate) fn rename_rgb_files(
 	}
 }
 
+/// Directory holding the media received for a funding, before the contract has vouched for it.
+pub fn get_media_staging_dir(ldk_data_dir: &Path, funding_txid: &str) -> PathBuf {
+	ldk_data_dir.join(format!("media_staging_{funding_txid}"))
+}
+
 /// Handle funding on the receiver side
 pub(crate) fn handle_funding(
 	temporary_channel_id: &ChannelId, funding_txid: String, ldk_data_dir: &Path,
-	consignment_endpoint: RgbTransport, push_asset_amount: Option<u64>, kv_store: &dyn KVStoreSync,
+	push_asset_amount: Option<u64>, kv_store: &dyn KVStoreSync,
 ) -> Result<(), ChannelError> {
 	let handle = Handle::current();
 	let _ = handle.enter();
-	let accept_res = futures::executor::block_on(_accept_transfer(
-		ldk_data_dir,
-		funding_txid.clone(),
-		consignment_endpoint,
-		kv_store,
-	));
-	let (consignment, remote_rgb_assignments) = match accept_res {
+	let accept_res =
+		futures::executor::block_on(_accept_transfer(ldk_data_dir, funding_txid.clone(), kv_store));
+	let (consignment, remote_rgb_assignments, media_digests, media_dir) = match accept_res {
 		Ok(res) => res,
 		Err(RgbLibError::InvalidConsignment) => {
 			return Err(ChannelError::close("Invalid RGB consignment for funding".to_owned()))
@@ -753,6 +769,32 @@ pub(crate) fn handle_funding(
 	let temp_chan_id = temporary_channel_id.0.as_hex().to_string();
 	kv_store.write_rgb_consignment(&temp_chan_id, consignment_buf);
 
+	let staging_dir = get_media_staging_dir(ldk_data_dir, &funding_txid);
+	for digest in media_digests {
+		let media_path = media_dir.join(&digest);
+		if media_path.exists() {
+			continue;
+		}
+		let staged_path = staging_dir.join(&digest);
+		let Ok(media_bytes) = fs::read(&staged_path) else {
+			return Err(ChannelError::close(format!(
+				"Missing RGB media file {digest} for funding"
+			)));
+		};
+		if sha256::Hash::hash(&media_bytes).to_string() != digest {
+			return Err(ChannelError::close(format!(
+				"Corrupt RGB media file {digest} for funding"
+			)));
+		}
+		if let Err(e) = fs::rename(&staged_path, &media_path) {
+			return Err(ChannelError::close(format!(
+				"Failed to store RGB media file {digest} for funding: {e}"
+			)));
+		}
+	}
+	// on the error paths above the staging directory is left for the file transfer handler's sweep
+	let _ = fs::remove_dir_all(&staging_dir);
+
 	if remote_rgb_assignments.len() != 1 {
 		return Err(ChannelError::close(format!(
 			"Unexpected number of RGB assignments: {}",
@@ -771,6 +813,8 @@ pub(crate) fn handle_funding(
 		local_rgb_amount: push_amount,
 		remote_rgb_amount: channel_rgb_amount - push_amount,
 		batch_transfer_idx: None,
+		// only meaningful on the initiator side, which is the one that sends media
+		counterparty_knows_asset: false,
 	};
 	let temporary_channel_id_str = temporary_channel_id.0.as_hex().to_string();
 
@@ -778,6 +822,16 @@ pub(crate) fn handle_funding(
 	kv_store.write_rgb_channel_info(&temporary_channel_id_str, &rgb_info, false);
 
 	Ok(())
+}
+
+pub(crate) fn set_counterparty_knows_asset(channel_id: &ChannelId, kv_store: &dyn KVStoreSync) {
+	let channel_id = channel_id.0.as_hex().to_string();
+	for pending in [true, false] {
+		if let Ok(mut rgb_info) = kv_store.read_rgb_channel_info(&channel_id, pending) {
+			rgb_info.counterparty_knows_asset = true;
+			kv_store.write_rgb_channel_info(&channel_id, &rgb_info, pending);
+		}
+	}
 }
 
 /// Update RGB channel amount in KVStore

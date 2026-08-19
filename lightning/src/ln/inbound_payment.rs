@@ -487,7 +487,7 @@ pub(crate) fn get_payment_preimage(
 				|bad_preimage_bytes| APIError::APIMisuseError {
 					err: format!(
 						"Payment hash {} did not match decoded preimage {}",
-						&payment_hash,
+						payment_hash,
 						log_bytes!(bad_preimage_bytes)
 					),
 				},

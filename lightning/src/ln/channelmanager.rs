@@ -36,7 +36,7 @@ use bitcoin::secp256k1::Secp256k1;
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use bitcoin::{secp256k1, Sequence, SignedAmount};
 
-use rgb_lib::{ContractId, RgbTransport};
+use rgb_lib::ContractId;
 
 use crate::blinded_path::message::{
 	AsyncPaymentsContext, BlindedMessagePath, MessageForwardNode, OffersContext,
@@ -4162,7 +4162,7 @@ where
 	/// [`Event::FundingGenerationReady::temporary_channel_id`]: events::Event::FundingGenerationReady::temporary_channel_id
 	/// [`Event::ChannelClosed::channel_id`]: events::Event::ChannelClosed::channel_id
 	#[rustfmt::skip]
-	pub fn create_channel(&self, their_network_key: PublicKey, channel_value_satoshis: u64, push_msat: u64, user_channel_id: u128, temporary_channel_id: Option<ChannelId>, override_config: Option<UserConfig>, consignment_endpoint: Option<RgbTransport>, push_asset_amount: Option<u64>, is_virtual: bool) -> Result<ChannelId, APIError> {
+	pub fn create_channel(&self, their_network_key: PublicKey, channel_value_satoshis: u64, push_msat: u64, user_channel_id: u128, temporary_channel_id: Option<ChannelId>, override_config: Option<UserConfig>, rgb_asset: Option<(ContractId, Option<u64>)>, is_virtual: bool) -> Result<ChannelId, APIError> {
 		if channel_value_satoshis < 1000 {
 			return Err(APIError::APIMisuseError { err: format!("Channel value must be at least 1000 satoshis. It was {}", channel_value_satoshis) });
 		}
@@ -4198,7 +4198,7 @@ where
 			};
 			match OutboundV1Channel::new(&self.fee_estimator, &self.entropy_source, &self.signer_provider, their_network_key,
 				their_features, channel_value_satoshis, push_msat, user_channel_id, config,
-				self.best_block.read().unwrap().height, outbound_scid_alias, temporary_channel_id, &*self.logger, consignment_endpoint, self.ldk_data_dir.clone(), push_asset_amount,
+				self.best_block.read().unwrap().height, outbound_scid_alias, temporary_channel_id, &*self.logger, rgb_asset, self.ldk_data_dir.clone(),
 				Arc::clone(&self.rgb_kv_store))
 			{
 				Ok(res) => res,
@@ -10635,8 +10635,8 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			{
 				Some(Ok(inbound_chan)) => {
 					let logger = WithChannelContext::from(&self.logger, &inbound_chan.context, None);
-					if let Some(consignment_endpoint) = &inbound_chan.funding.consignment_endpoint {
-						match handle_funding(&msg.temporary_channel_id, msg.funding_txid.to_string(), &self.ldk_data_dir, consignment_endpoint.clone(), inbound_chan.funding.push_asset_amount, self.rgb_kv_store.as_ref()) {
+					if inbound_chan.funding.is_colored() {
+						match handle_funding(&msg.temporary_channel_id, msg.funding_txid.to_string(), &self.ldk_data_dir, inbound_chan.funding.push_asset_amount(), self.rgb_kv_store.as_ref()) {
 							Ok(()) => (),
 							Err(e) => {
 								// at this point the channel initiator already transitioned its channel to the funded channel ID
@@ -10798,7 +10798,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 								"Lost channel state for channel {}.\n\
 								Received peer storage with a more recent state than what our node had.\n\
 								Use the FundRecoverer to initiate a force close and sweep the funds.",
-								&mon_holder.channel_id
+								mon_holder.channel_id
 							);
 						}
 					}

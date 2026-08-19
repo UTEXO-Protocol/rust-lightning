@@ -30,7 +30,7 @@ use bitcoin::secp256k1::{ecdsa::Signature, Secp256k1};
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use bitcoin::{secp256k1, sighash, FeeRate, Sequence, TxIn};
 
-use rgb_lib::{ContractId, RgbTransport};
+use rgb_lib::ContractId;
 
 use crate::blinded_path::message::BlindedMessagePath;
 use crate::chain::chaininterface::{
@@ -80,8 +80,9 @@ use crate::offers::static_invoice::StaticInvoice;
 use crate::rgb_utils::{
 	color_closing, color_commitment, color_htlc, get_rgb_channel_info_pending,
 	holder_validate_install_psbt_output_witness_scripts_hex,
-	holder_validate_take_psbt_output_witness_scripts_hex, is_tx_colored, rename_rgb_files,
-	update_rgb_channel_amount_pending, RgbKvStoreExt,
+	holder_validate_take_psbt_output_witness_scripts_hex, is_asset_known, is_tx_colored,
+	rename_rgb_files, set_counterparty_knows_asset, update_rgb_channel_amount_pending,
+	RgbKvStoreExt,
 };
 use crate::routing::gossip::NodeId;
 use crate::sign::ecdsa::EcdsaChannelSigner;
@@ -116,8 +117,7 @@ use super::channel_keys::{DelayedPaymentBasepoint, HtlcBasepoint, RevocationBase
 fn rgb_install_holder_validate_psbt_witness_scripts_if_colored(
 	funding: &FundingScope, commitment_tx: &CommitmentTransaction,
 ) -> Result<(), ChannelError> {
-	let is_rgb_channel =
-		funding.push_asset_amount.is_some() || funding.consignment_endpoint.is_some();
+	let is_rgb_channel = funding.is_colored();
 	if !is_rgb_channel && !is_tx_colored(&commitment_tx.trust().built_transaction().transaction) {
 		return Ok(());
 	}
@@ -2407,11 +2407,9 @@ pub(crate) struct FundingScope {
 	/// [`ChannelContext::minimum_depth`].
 	minimum_depth_override: Option<u32>,
 
-	/// The consignment endpoint used to exchange the RGB consignment.
-	pub(super) consignment_endpoint: Option<RgbTransport>,
-
-	/// The RGB asset amount to push to the counterparty on channel open.
-	pub(super) push_asset_amount: Option<u64>,
+	/// The RGB asset this channel is for, if it is a colored channel: the contract ID of the asset
+	/// plus the amount of it pushed to the counterparty on channel open, if any.
+	pub(super) rgb_asset: Option<(ContractId, Option<u64>)>,
 }
 
 impl Writeable for FundingScope {
@@ -2426,8 +2424,7 @@ impl Writeable for FundingScope {
 			(13, self.funding_tx_confirmation_height, required),
 			(15, self.short_channel_id, option),
 			(17, self.minimum_depth_override, option),
-			(19, self.consignment_endpoint, option),
-			(21, self.push_asset_amount, option),
+			(21, self.rgb_asset, option),
 		});
 		Ok(())
 	}
@@ -2445,8 +2442,7 @@ impl Readable for FundingScope {
 		let mut funding_tx_confirmation_height = RequiredWrapper(None);
 		let mut short_channel_id = None;
 		let mut minimum_depth_override = None;
-		let mut consignment_endpoint = None;
-		let mut push_asset_amount = None;
+		let mut rgb_asset: Option<(ContractId, Option<u64>)> = None;
 
 		read_tlv_fields!(reader, {
 			(1, value_to_self_msat, required),
@@ -2458,8 +2454,7 @@ impl Readable for FundingScope {
 			(13, funding_tx_confirmation_height, required),
 			(15, short_channel_id, option),
 			(17, minimum_depth_override, option),
-			(19, consignment_endpoint, option),
-			(21, push_asset_amount, option),
+			(21, rgb_asset, option),
 		});
 
 		Ok(Self {
@@ -2476,8 +2471,7 @@ impl Readable for FundingScope {
 			funding_tx_confirmation_height: funding_tx_confirmation_height.0.unwrap(),
 			short_channel_id,
 			minimum_depth_override,
-			consignment_endpoint,
-			push_asset_amount,
+			rgb_asset,
 			#[cfg(any(test, fuzzing))]
 			next_local_fee: Mutex::new(PredictedNextFee::default()),
 			#[cfg(any(test, fuzzing))]
@@ -2493,6 +2487,21 @@ impl FundingScope {
 
 	pub(crate) fn get_value_to_self_msat(&self) -> u64 {
 		self.value_to_self_msat
+	}
+
+	/// Whether this is an RGB (colored) channel.
+	pub(crate) fn is_colored(&self) -> bool {
+		self.rgb_asset.is_some()
+	}
+
+	/// The RGB contract ID of the asset this channel is for, if it is a colored channel.
+	pub(crate) fn contract_id(&self) -> Option<ContractId> {
+		self.rgb_asset.map(|(contract_id, _)| contract_id)
+	}
+
+	/// The RGB asset amount pushed to the counterparty on channel open, if any.
+	pub(crate) fn push_asset_amount(&self) -> Option<u64> {
+		self.rgb_asset.and_then(|(_, push_asset_amount)| push_asset_amount)
 	}
 
 	pub fn get_holder_counterparty_selected_channel_reserve_satoshis(&self) -> (u64, Option<u64>) {
@@ -2665,8 +2674,7 @@ impl FundingScope {
 			funding_tx_confirmed_in: None,
 			minimum_depth_override: None,
 			short_channel_id: None,
-			consignment_endpoint: None,
-			push_asset_amount: None,
+			rgb_asset: None,
 		}
 	}
 
@@ -3482,7 +3490,7 @@ where
 		msg_channel_reserve_satoshis: u64,
 		msg_push_msat: u64,
 		open_channel_fields: msgs::CommonOpenChannelFields,
-		push_asset_amount: Option<u64>,
+		rgb_asset: Option<(ContractId, Option<u64>)>,
 		ldk_data_dir: PathBuf,
 		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<(FundingScope, ChannelContext<SP>), ChannelError>
@@ -3697,8 +3705,7 @@ where
 			funding_tx_confirmation_height: 0,
 			short_channel_id: None,
 			minimum_depth_override: None,
-			consignment_endpoint: open_channel_fields.consignment_endpoint.clone(),
-			push_asset_amount,
+			rgb_asset,
 		};
 		let channel_context = ChannelContext {
 			user_id,
@@ -3813,7 +3820,7 @@ where
 
 			interactive_tx_signing_session: None,
 
-			is_colored: funding.consignment_endpoint.is_some(),
+			is_colored: funding.is_colored(),
 			ldk_data_dir,
 			rgb_kv_store,
 		};
@@ -3839,9 +3846,8 @@ where
 		channel_keys_id: [u8; 32],
 		holder_signer: <SP::Target as SignerProvider>::EcdsaSigner,
 		_logger: L,
-		consignment_endpoint: Option<RgbTransport>,
+		rgb_asset: Option<(ContractId, Option<u64>)>,
 		ldk_data_dir: PathBuf,
-		push_asset_amount: Option<u64>,
 		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<(FundingScope, ChannelContext<SP>), APIError>
 		where
@@ -3948,8 +3954,7 @@ where
 			funding_tx_confirmation_height: 0,
 			short_channel_id: None,
 			minimum_depth_override: None,
-			consignment_endpoint: consignment_endpoint.clone(),
-			push_asset_amount,
+			rgb_asset,
 		};
 		let channel_context = Self {
 			user_id,
@@ -4062,7 +4067,7 @@ where
 
 			interactive_tx_signing_session: None,
 
-			is_colored: funding.consignment_endpoint.is_some(),
+			is_colored: funding.is_colored(),
 			ldk_data_dir,
 			rgb_kv_store,
 		};
@@ -12006,12 +12011,12 @@ where
 		if self.context.secp_ctx.verify_ecdsa(&msghash, &msg.node_signature, &self.context.get_counterparty_node_id()).is_err() {
 			return Err(ChannelError::close(format!(
 				"Bad announcement_signatures. Failed to verify node_signature. UnsignedChannelAnnouncement used for verification is {:?}. their_node_key is {:?}",
-				 &announcement, self.context.get_counterparty_node_id())));
+				 announcement, self.context.get_counterparty_node_id())));
 		}
 		if self.context.secp_ctx.verify_ecdsa(&msghash, &msg.bitcoin_signature, self.funding.counterparty_funding_pubkey()).is_err() {
 			return Err(ChannelError::close(format!(
 				"Bad announcement_signatures. Failed to verify bitcoin_signature. UnsignedChannelAnnouncement used for verification is {:?}. their_bitcoin_key is ({:?})",
-				&announcement, self.funding.counterparty_funding_pubkey())));
+				announcement, self.funding.counterparty_funding_pubkey())));
 		}
 
 		self.context.announcement_sigs = Some((msg.node_signature, msg.bitcoin_signature));
@@ -13683,7 +13688,7 @@ where
 	pub fn new<ES: Deref, F: Deref, L: Deref>(
 		fee_estimator: &LowerBoundedFeeEstimator<F>, entropy_source: &ES, signer_provider: &SP, counterparty_node_id: PublicKey, their_features: &InitFeatures,
 		channel_value_satoshis: u64, push_msat: u64, user_id: u128, config: &UserConfig, current_chain_height: u32,
-		outbound_scid_alias: u64, temporary_channel_id: Option<ChannelId>, logger: L, consignment_endpoint: Option<RgbTransport>, ldk_data_dir: PathBuf, push_asset_amount: Option<u64>,
+		outbound_scid_alias: u64, temporary_channel_id: Option<ChannelId>, logger: L, rgb_asset: Option<(ContractId, Option<u64>)>, ldk_data_dir: PathBuf,
 		rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
 	) -> Result<OutboundV1Channel<SP>, APIError>
 	where ES::Target: EntropySource,
@@ -13724,9 +13729,8 @@ where
 			channel_keys_id,
 			holder_signer,
 			logger,
-			consignment_endpoint,
+			rgb_asset,
 			ldk_data_dir,
-			push_asset_amount,
 			rgb_kv_store,
 		)?;
 		let unfunded_context = UnfundedChannelContext {
@@ -13824,7 +13828,7 @@ where
 
 		debug_assert!(self.funding.funding_transaction.is_none());
 		self.funding.funding_transaction = Some(funding_transaction);
-		self.context.is_batch_funding = Some(()).filter(|_| is_batch_funding);
+		self.context.is_batch_funding = is_batch_funding.then_some(());
 
 		let funding_created = self.get_funding_created_msg(logger);
 		Ok(funding_created)
@@ -13905,11 +13909,10 @@ where
 					None => Builder::new().into_script(),
 				}),
 				channel_type: Some(self.funding.get_channel_type().clone()),
-				consignment_endpoint: self.funding.consignment_endpoint.clone(),
 			},
 			push_msat: self.funding.get_value_satoshis() * 1000 - self.funding.value_to_self_msat,
 			channel_reserve_satoshis: self.funding.holder_selected_channel_reserve_satoshis,
-			push_asset_amount: self.funding.push_asset_amount,
+			rgb_asset: self.funding.rgb_asset,
 		})
 	}
 
@@ -13924,7 +13927,16 @@ where
 			their_features,
 			&msg.common_fields,
 			msg.channel_reserve_satoshis,
-		)
+		)?;
+
+		if self.funding.is_colored() && msg.known_asset {
+			set_counterparty_knows_asset(
+				&self.context.channel_id,
+				self.context.rgb_kv_store.as_ref(),
+			);
+		}
+
+		Ok(())
 	}
 
 	/// Handles a funding_signed message from the remote end.
@@ -14107,7 +14119,7 @@ where
 			msg.channel_reserve_satoshis,
 			msg.push_msat,
 			msg.common_fields.clone(),
-			msg.push_asset_amount,
+			msg.rgb_asset,
 			ldk_data_dir,
 			rgb_kv_store,
 		)?;
@@ -14165,6 +14177,15 @@ where
 		};
 		let keys = self.funding.get_holder_pubkeys();
 
+		let known_asset = match self.funding.contract_id() {
+			Some(contract_id) => is_asset_known(
+				contract_id,
+				&self.context.ldk_data_dir,
+				self.context.rgb_kv_store.as_ref(),
+			),
+			None => false,
+		};
+
 		Some(msgs::AcceptChannel {
 			common_fields: msgs::CommonAcceptChannelFields {
 				temporary_channel_id: self.context.channel_id,
@@ -14187,6 +14208,7 @@ where
 				channel_type: Some(self.funding.get_channel_type().clone()),
 			},
 			channel_reserve_satoshis: self.funding.holder_selected_channel_reserve_satoshis,
+			known_asset,
 			#[cfg(taproot)]
 			next_local_nonce: None,
 		})
@@ -14350,10 +14372,9 @@ where
 			channel_keys_id,
 			holder_signer,
 			logger,
-			// ok to pass consignment_endpoint as None since this method is unused
+			// ok to pass rgb_asset as None since this method is unused
 			None,
 			ldk_data_dir,
-			None,
 			rgb_kv_store,
 		)?;
 		let unfunded_context = UnfundedChannelContext {
@@ -14446,7 +14467,6 @@ where
 					None => Builder::new().into_script(),
 				}),
 				channel_type: Some(self.funding.get_channel_type().clone()),
-				consignment_endpoint: self.funding.consignment_endpoint.clone(),
 			},
 			funding_feerate_sat_per_1000_weight: self.context.feerate_per_kw,
 			second_per_commitment_point,
@@ -15199,8 +15219,7 @@ where
 			(65, self.quiescent_action, option), // Added in 0.2
 			(67, pending_outbound_held_htlc_flags, optional_vec), // Added in 0.2
 			(69, holding_cell_held_htlc_flags, optional_vec), // Added in 0.2
-			(71, self.funding.consignment_endpoint, option),
-			(73, self.funding.push_asset_amount, option),
+			(73, self.funding.rgb_asset, option),
 			(75, trusted_no_broadcast, option),
 		});
 
@@ -15551,8 +15570,7 @@ where
 		let mut channel_keys_id = [0u8; 32];
 		let mut temporary_channel_id: Option<ChannelId> = None;
 		let mut holder_max_accepted_htlcs: Option<u16> = None;
-		let mut consignment_endpoint: Option<RgbTransport> = None;
-		let mut push_asset_amount: Option<u64> = None;
+		let mut rgb_asset: Option<(ContractId, Option<u64>)> = None;
 
 		let mut blocked_monitor_updates = Some(Vec::new());
 
@@ -15636,8 +15654,7 @@ where
 			(65, quiescent_action, upgradable_option), // Added in 0.2
 			(67, pending_outbound_held_htlc_flags_opt, optional_vec), // Added in 0.2
 			(69, holding_cell_held_htlc_flags_opt, optional_vec), // Added in 0.2
-			(71, consignment_endpoint, option),
-			(73, push_asset_amount, option),
+			(73, rgb_asset, option),
 			(75, trusted_no_broadcast, option),
 		});
 
@@ -15917,8 +15934,7 @@ where
 				funding_tx_confirmation_height,
 				short_channel_id,
 				minimum_depth_override,
-				consignment_endpoint: consignment_endpoint.clone(),
-				push_asset_amount,
+				rgb_asset,
 			},
 			context: ChannelContext {
 				user_id,
@@ -16031,7 +16047,7 @@ where
 				trusted_no_broadcast: trusted_no_broadcast.unwrap_or(false),
 
 				interactive_tx_signing_session,
-				is_colored: consignment_endpoint.is_some(),
+				is_colored: rgb_asset.is_some(),
 				ldk_data_dir,
 				rgb_kv_store,
 			},
@@ -18023,8 +18039,7 @@ mod tests {
 			funding_tx_confirmation_height: 0,
 			short_channel_id: None,
 			minimum_depth_override: None,
-			consignment_endpoint: None,
-			push_asset_amount: None,
+			rgb_asset: None,
 		};
 		let post_channel_value =
 			funding.compute_post_splice_value(our_funding_contribution, their_funding_contribution);
