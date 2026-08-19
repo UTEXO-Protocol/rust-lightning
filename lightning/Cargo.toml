@@ -56,7 +56,9 @@ amplify = "4.8"
 bincode = "1.3"
 rgb-strict-encoding = "1.0.1"
 futures = "0.3"
-rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", tag = "v0.3.0-beta.32", features = [
+# Temporary: rgb-lib PR #91 (upstream sync) is unmerged and untagged. Must match the
+# rgb-lightning-node pin exactly, and flip back to a UTEXO-Protocol tag (beta.34+) together.
+rgb-lib = { git = "https://github.com/dcorral/rgb-lib.git", rev = "94b6221ea9bf04562d89c21c9f074f4ecfbddd5d", features = [
     "electrum",
     "esplora",
 ] }
