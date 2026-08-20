@@ -28,6 +28,9 @@ std = []
 
 dnssec = ["dnssec-prover/validation"]
 
+electrum = ["rgb-lib/electrum"]
+esplora = ["rgb-lib/esplora"]
+
 # Generates low-r bitcoin signatures, which saves 1 byte in 50% of the cases
 grind_signatures = []
 
@@ -58,10 +61,7 @@ rgb-strict-encoding = "1.0.1"
 futures = "0.3"
 # Temporary: rgb-lib PR #91 (upstream sync) is unmerged and untagged. Must match the
 # rgb-lightning-node pin exactly, and flip back to a UTEXO-Protocol tag (beta.34+) together.
-rgb-lib = { git = "https://github.com/dcorral/rgb-lib.git", rev = "94b6221ea9bf04562d89c21c9f074f4ecfbddd5d", features = [
-    "electrum",
-    "esplora",
-] }
+rgb-lib = { git = "https://github.com/dcorral/rgb-lib.git", rev = "94b6221ea9bf04562d89c21c9f074f4ecfbddd5d", default-features = false }
 serde = { version = "^1.0", features = [
     "derive",
 ] }

@@ -38,7 +38,7 @@ jobs:
         run: echo "RUSTFLAGS=-C linker=rust-lld" >> "$GITHUB_ENV"
       - name: Build the workspace
         shell: bash # Default on Winblows is powershell
-        run: cargo check --workspace --verbose --color always
+        run: cargo check --workspace --features lightning/electrum --verbose --color always
 
   linting:
     runs-on: ubuntu-latest

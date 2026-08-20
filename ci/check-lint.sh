@@ -116,4 +116,4 @@ CLIPPY() {
 		-A clippy::useless-borrows-in-formatting
 }
 
-CLIPPY
+CLIPPY "--features lightning/electrum"

@@ -1,5 +1,10 @@
 //! A module to provide RGB functionality
 
+// this module uses the online APIs of rgb-lib, which are only available if rgb-lib has been built
+// with support for at least one indexer protocol
+#[cfg(not(any(feature = "electrum", feature = "esplora")))]
+compile_error!("at least one of the `electrum` and `esplora` features needs to be enabled");
+
 use crate::ln::chan_utils::{
 	get_countersigner_payment_script, BuiltCommitmentTransaction, ClosingTransaction,
 	CommitmentTransaction, HTLCOutputInCommitment,

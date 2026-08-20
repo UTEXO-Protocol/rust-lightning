@@ -26,10 +26,7 @@ bitcoin = { version = "0.32.2", default-features = false, features = ["secp-reco
 # RGB and related
 # Temporary: rgb-lib PR #91 (upstream sync) is unmerged and untagged. Must match the
 # rgb-lightning-node pin exactly, and flip back to a UTEXO-Protocol tag (beta.34+) together.
-rgb-lib = { git = "https://github.com/dcorral/rgb-lib.git", rev = "94b6221ea9bf04562d89c21c9f074f4ecfbddd5d", features = [
-    "electrum",
-    "esplora",
-] }
+rgb-lib = { git = "https://github.com/dcorral/rgb-lib.git", rev = "94b6221ea9bf04562d89c21c9f074f4ecfbddd5d", default-features = false }
 
 [dev-dependencies]
 serde_json = { version = "1"}

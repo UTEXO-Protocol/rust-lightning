@@ -18,6 +18,8 @@ use lightning::util::logger::Logger;
 use lightning::{log_debug, log_error, log_trace};
 
 use bitcoin::block::Header;
+use bitcoin::opcodes::all::OP_RETURN;
+use bitcoin::opcodes::OP_FALSE;
 use bitcoin::{BlockHash, Script, Transaction, Txid};
 
 use std::collections::HashSet;
@@ -289,26 +291,56 @@ where
 						continue;
 					}
 
-					watched_txs.push((txid, tx.clone()));
-					// We watch an output of the transaction of interest in order to retrieve the
-					// associated script history, before narrowing down our search through
-					// `filter`ing by `txid` below. We skip OP_RETURN outputs as Electrum servers
-					// don't index provably-unspendable scripts (e.g. the RGB commitment at vout 0
-					// of a colored funding tx), so their history is empty and the tx would never
-					// be seen as confirmed. We fall back to the first output to keep this lookup
-					// aligned with `watched_txs`.
-					let script_pubkey = tx
+					// We watch an arbitrary output of the transaction of interest in order to
+					// retrieve the associated script history, before narrowing down our search
+					// through `filter`ing by `txid` below. Electrum servers don't index
+					// provably-unspendable outputs (e.g. the RGB commitment at vout 0 of a
+					// colored funding tx), so picking one of those would always yield an empty
+					// history and the tx would never be seen as confirmed.
+					let mut spk = tx
 						.output
 						.iter()
-						.find(|o| !o.script_pubkey.is_op_return())
-						.or_else(|| tx.output.first())
-						.map(|o| o.script_pubkey.clone());
-					if let Some(script_pubkey) = script_pubkey {
-						watched_script_pubkeys.push(script_pubkey);
-					} else {
-						debug_assert!(false, "Failed due to retrieving invalid tx data.");
-						log_error!(self.logger, "Failed due to retrieving invalid tx data.");
-						return Err(InternalError::Failed);
+						.find(|txo| {
+							!txo.script_pubkey.is_op_return()
+								&& !txo
+									.script_pubkey
+									.as_bytes()
+									.starts_with(&[OP_FALSE.to_u8(), OP_RETURN.to_u8()])
+						})
+						.map(|txo| txo.script_pubkey.clone());
+
+					// Fall back to the script of an input's previous output: its history includes
+					// this transaction, as we spend from it.
+					if spk.is_none() && !tx.is_coinbase() {
+						for txin in &tx.input {
+							match self.client.transaction_get(&txin.previous_output.txid) {
+								Ok(parent) => {
+									if let Some(prev_out) =
+										parent.output.get(txin.previous_output.vout as usize)
+									{
+										spk = Some(prev_out.script_pubkey.clone());
+										break;
+									}
+								},
+								Err(electrum_client::Error::Protocol(_)) => continue,
+								Err(e) => {
+									log_error!(
+										self.logger,
+										"Failed to look up transaction {}: {}.",
+										txin.previous_output.txid,
+										e
+									);
+									return Err(InternalError::Failed);
+								},
+							}
+						}
+					}
+
+					// Nothing we could query a history for, e.g. a coinbase whose outputs are all
+					// unindexed. Skip it rather than failing the whole sync.
+					if let Some(spk) = spk {
+						watched_txs.push((txid, tx.clone()));
+						watched_script_pubkeys.push(spk);
 					}
 				},
 				Err(electrum_client::Error::Protocol(_)) => {
