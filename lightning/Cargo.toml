@@ -61,7 +61,7 @@ rgb-strict-encoding = "1.0.1"
 futures = "0.3"
 # Temporary: rgb-lib PR #91 (upstream sync) is unmerged and untagged. Must match the
 # rgb-lightning-node pin exactly, and flip back to a UTEXO-Protocol tag (beta.34+) together.
-rgb-lib = { git = "https://github.com/dcorral/rgb-lib.git", rev = "94b6221ea9bf04562d89c21c9f074f4ecfbddd5d", default-features = false }
+rgb-lib = { git = "https://github.com/dcorral/rgb-lib.git", rev = "c097984fd37ff9767758f1e5e37eca27307934f4", default-features = false }
 serde = { version = "^1.0", features = [
     "derive",
 ] }
