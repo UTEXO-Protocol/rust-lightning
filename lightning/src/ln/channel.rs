@@ -2412,6 +2412,24 @@ pub(crate) struct FundingScope {
 	pub(super) rgb_asset: Option<(ContractId, Option<u64>)>,
 }
 
+/// Detection-only reader for the legacy pre-sync colored-channel marker.
+///
+/// Before the TLV format change the colored-channel marker was an `RgbTransport`
+/// (`consignment_endpoint`), serialized as a u16-length-prefixed UTF-8 string, stored at TLV 19
+/// in `FundingScope` and TLV 71 in the channel context. Those odd TLVs are no longer in the read
+/// lists and would otherwise be silently skipped; we read them back only to detect their presence
+/// so a pre-sync colored channel is refused instead of being read as non-colored (asset loss).
+struct LegacyColoredMarker;
+
+impl Readable for LegacyColoredMarker {
+	fn read<R: io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let len: u16 = Readable::read(reader)?;
+		let mut buf = vec![0u8; len as usize];
+		reader.read_exact(&mut buf)?;
+		Ok(LegacyColoredMarker)
+	}
+}
+
 impl Writeable for FundingScope {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
 		write_tlv_fields!(writer, {
@@ -2442,6 +2460,7 @@ impl Readable for FundingScope {
 		let mut funding_tx_confirmation_height = RequiredWrapper(None);
 		let mut short_channel_id = None;
 		let mut minimum_depth_override = None;
+		let mut legacy_colored_marker: Option<LegacyColoredMarker> = None;
 		let mut rgb_asset: Option<(ContractId, Option<u64>)> = None;
 
 		read_tlv_fields!(reader, {
@@ -2454,8 +2473,16 @@ impl Readable for FundingScope {
 			(13, funding_tx_confirmation_height, required),
 			(15, short_channel_id, option),
 			(17, minimum_depth_override, option),
+			(19, legacy_colored_marker, option),
 			(21, rgb_asset, option),
 		});
+
+		// Tripwire: a pre-sync build persisted the colored-channel marker at TLV 19
+		// (`consignment_endpoint`); the marker now lives in `rgb_asset` at TLV 21 and is not
+		// migrated. Refuse to read rather than silently drop the asset (is_colored=false).
+		if legacy_colored_marker.is_some() && rgb_asset.is_none() {
+			return Err(DecodeError::DangerousValue);
+		}
 
 		Ok(Self {
 			value_to_self_msat: value_to_self_msat.0.unwrap(),
@@ -15570,6 +15597,7 @@ where
 		let mut channel_keys_id = [0u8; 32];
 		let mut temporary_channel_id: Option<ChannelId> = None;
 		let mut holder_max_accepted_htlcs: Option<u16> = None;
+		let mut legacy_colored_marker: Option<LegacyColoredMarker> = None;
 		let mut rgb_asset: Option<(ContractId, Option<u64>)> = None;
 
 		let mut blocked_monitor_updates = Some(Vec::new());
@@ -15654,9 +15682,17 @@ where
 			(65, quiescent_action, upgradable_option), // Added in 0.2
 			(67, pending_outbound_held_htlc_flags_opt, optional_vec), // Added in 0.2
 			(69, holding_cell_held_htlc_flags_opt, optional_vec), // Added in 0.2
+			(71, legacy_colored_marker, option),
 			(73, rgb_asset, option),
 			(75, trusted_no_broadcast, option),
 		});
+
+		// Tripwire: a pre-sync build persisted the colored-channel marker at TLV 71
+		// (`consignment_endpoint`); the marker now lives in `rgb_asset` at TLV 73 and is not
+		// migrated. Refuse to read rather than silently drop the asset (is_colored=false).
+		if legacy_colored_marker.is_some() && rgb_asset.is_none() {
+			return Err(DecodeError::DangerousValue);
+		}
 
 		let holder_signer = signer_provider.derive_channel_signer(channel_keys_id);
 
