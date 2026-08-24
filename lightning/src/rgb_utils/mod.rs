@@ -100,7 +100,6 @@ pub struct RgbInfo {
 	/// serialized unconditionally to stay in sync on read.
 	pub batch_transfer_idx: Option<i32>,
 	/// Whether the channel acceptor told us (in `accept_channel`) that it already knows the asset
-	#[serde(default)]
 	pub counterparty_knows_asset: bool,
 }
 
