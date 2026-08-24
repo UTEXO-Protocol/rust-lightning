@@ -768,6 +768,26 @@ pub(crate) fn handle_funding(
 		Err(e) => return Err(ChannelError::close(format!("Unexpected error: {e}"))),
 	};
 
+	// Validate before persisting anything: an invalid consignment must not leave orphaned
+	// media/consignment behind in the wallet dirs.
+	if remote_rgb_assignments.len() != 1 {
+		return Err(ChannelError::close(format!(
+			"Unexpected number of RGB assignments: {}",
+			remote_rgb_assignments.len()
+		)));
+	}
+	let channel_rgb_amount = match remote_rgb_assignments[0] {
+		Assignment::Fungible(amt) => amt,
+		Assignment::NonFungible => 1,
+		_ => unreachable!("unsupported schema"),
+	};
+	let push_amount = push_asset_amount.unwrap_or(0);
+	let remote_rgb_amount = channel_rgb_amount.checked_sub(push_amount).ok_or_else(|| {
+		ChannelError::close(format!(
+			"push_asset_amount {push_amount} exceeds channel asset amount {channel_rgb_amount}"
+		))
+	})?;
+
 	let mut consignment_buf = Vec::new();
 	consignment.save(&mut consignment_buf).expect("unable to serialize consignment");
 	kv_store.write_rgb_consignment(&funding_txid, consignment_buf.clone());
@@ -800,23 +820,6 @@ pub(crate) fn handle_funding(
 	// on the error paths above the staging directory is left for the file transfer handler's sweep
 	let _ = fs::remove_dir_all(&staging_dir);
 
-	if remote_rgb_assignments.len() != 1 {
-		return Err(ChannelError::close(format!(
-			"Unexpected number of RGB assignments: {}",
-			remote_rgb_assignments.len()
-		)));
-	}
-	let channel_rgb_amount = match remote_rgb_assignments[0] {
-		Assignment::Fungible(amt) => amt,
-		Assignment::NonFungible => 1,
-		_ => unreachable!("unsupported schema"),
-	};
-	let push_amount = push_asset_amount.unwrap_or(0);
-	let remote_rgb_amount = channel_rgb_amount.checked_sub(push_amount).ok_or_else(|| {
-		ChannelError::close(format!(
-			"push_asset_amount {push_amount} exceeds channel asset amount {channel_rgb_amount}"
-		))
-	})?;
 	let rgb_info = RgbInfo {
 		contract_id: consignment.contract_id(),
 		schema: AssetSchema::from_schema_id(consignment.schema_id()).unwrap(),
