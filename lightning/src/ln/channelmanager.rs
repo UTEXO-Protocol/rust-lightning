@@ -119,7 +119,10 @@ use crate::onion_message::messenger::{
 	MessageRouter, MessageSendInstructions, Responder, ResponseInstruction,
 };
 use crate::onion_message::offers::{OffersMessage, OffersMessageHandler};
-use crate::rgb_utils::{handle_funding, is_channel_rgb, RgbKvStoreExt};
+use crate::rgb_utils::{
+	abort_prepared_funding, is_channel_rgb, prepare_funding, promote_funding, rollback_funding,
+	RgbKvStoreExt,
+};
 use crate::routing::router::{
 	BlindedTail, FixedRouter, InFlightHtlcs, Path, Payee, PaymentParameters, Route,
 	RouteParameters, RouteParametersConfig, Router,
@@ -206,6 +209,50 @@ use crate::ln::script::ShutdownScript;
 /// `internal_funding_created` handler.
 #[cfg(any(test, feature = "_rln_test_hooks"))]
 pub static DROP_FUNDING_SIGNED_ON_NODE: Mutex<Option<PublicKey>> = Mutex::new(None);
+
+#[cfg(all(feature = "_rln_test_hooks", feature = "std"))]
+fn pause_at_rgb_funding_checkpoint(
+	checkpoint_address_env: &str, temporary_channel_id: &ChannelId, funding_txid: &bitcoin::Txid,
+) {
+	use std::io::Write;
+	use std::net::TcpStream;
+
+	let Ok(checkpoint_address) = std::env::var(checkpoint_address_env) else { return };
+
+	let mut stream = TcpStream::connect(&checkpoint_address)
+		.expect("test checkpoint listener must accept the RGB funding notification");
+	writeln!(stream, "{} {funding_txid}", temporary_channel_id)
+		.expect("test checkpoint notification must be written");
+	stream.flush().expect("test checkpoint notification must be flushed");
+
+	// The controller normally terminates the process after this notification. A release byte keeps
+	// cleanup deterministic when a test fails before issuing the kill.
+	let mut release = [0_u8; 1];
+	std::io::Read::read_exact(&mut stream, &mut release)
+		.expect("test checkpoint must be released or the process terminated");
+}
+
+#[cfg(all(feature = "_rln_test_hooks", feature = "std"))]
+fn pause_after_rgb_funding_preparation(
+	temporary_channel_id: &ChannelId, funding_txid: &bitcoin::Txid,
+) {
+	pause_at_rgb_funding_checkpoint(
+		"RLN_TEST_RGB_FUNDING_PREPARED_CHECKPOINT",
+		temporary_channel_id,
+		funding_txid,
+	);
+}
+
+#[cfg(all(feature = "_rln_test_hooks", feature = "std"))]
+fn pause_after_rgb_funding_promotion(
+	temporary_channel_id: &ChannelId, funding_txid: &bitcoin::Txid,
+) {
+	pause_at_rgb_funding_checkpoint(
+		"RLN_TEST_RGB_FUNDING_PROMOTED_CHECKPOINT",
+		temporary_channel_id,
+		funding_txid,
+	);
+}
 
 // We hold various information about HTLC relay in the HTLC objects in Channel itself:
 //
@@ -2879,7 +2926,6 @@ pub struct ChannelManager<
 	per_peer_state: FairRwLock<HashMap<PublicKey, Mutex<PeerState<SP>>>>,
 	#[cfg(any(test, feature = "_test_utils"))]
 	pub(super) per_peer_state: FairRwLock<HashMap<PublicKey, Mutex<PeerState<SP>>>>,
-
 	/// We only support using one of [`ChannelMonitorUpdateStatus::InProgress`] and
 	/// [`ChannelMonitorUpdateStatus::Completed`] without restarting. Because the API does not
 	/// otherwise directly enforce this, we enforce it in non-test builds here by storing which one
@@ -4051,7 +4097,6 @@ where
 			highest_seen_timestamp: AtomicUsize::new(current_timestamp as usize),
 
 			per_peer_state: FairRwLock::new(new_hash_map()),
-
 			#[cfg(not(any(test, feature = "_externalize_tests")))]
 			monitor_update_type: AtomicUsize::new(0),
 
@@ -4270,6 +4315,14 @@ where
 			}
 		}
 		res
+	}
+
+	/// Gets channels which have completed the funding handshake, in random order.
+	///
+	/// Unlike [`Self::list_channels`], this excludes channels which have only negotiated or been
+	/// assigned a funding outpoint but have not reached funded channel state.
+	pub fn list_funded_channels(&self) -> Vec<ChannelDetails> {
+		self.list_funded_channels_with_filter(|_| true)
 	}
 
 	/// Gets the list of open channels, in random order. See [`ChannelDetails`] field documentation for
@@ -10619,57 +10672,124 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	#[rustfmt::skip]
 	fn internal_funding_created(&self, counterparty_node_id: &PublicKey, msg: &msgs::FundingCreated) -> Result<(), MsgHandleErrInternal> {
 		let best_block = *self.best_block.read().unwrap();
-
-		let per_peer_state = self.per_peer_state.read().unwrap();
-		let peer_state_mutex = per_peer_state.get(counterparty_node_id)
-			.ok_or_else(|| {
-				debug_assert!(false);
-				MsgHandleErrInternal::send_err_msg_no_close(format!("Can't find a peer matching the passed counterparty node_id {counterparty_node_id}"), msg.temporary_channel_id)
-			})?;
-
-		let mut peer_state_lock = peer_state_mutex.lock().unwrap();
-		let peer_state = &mut *peer_state_lock;
-		let (mut chan, funding_msg_opt, monitor) =
+		let inbound_chan = {
+			let per_peer_state = self.per_peer_state.read().unwrap();
+			let peer_state_mutex = per_peer_state.get(counterparty_node_id)
+				.ok_or_else(|| {
+					debug_assert!(false);
+					MsgHandleErrInternal::send_err_msg_no_close(format!("Can't find a peer matching the passed counterparty node_id {counterparty_node_id}"), msg.temporary_channel_id)
+				})?;
+			let mut peer_state_lock = peer_state_mutex.lock().unwrap();
+			let peer_state = &mut *peer_state_lock;
 			match peer_state.channel_by_id.remove(&msg.temporary_channel_id)
 				.map(Channel::into_unfunded_inbound_v1)
 			{
-				Some(Ok(inbound_chan)) => {
-					let logger = WithChannelContext::from(&self.logger, &inbound_chan.context, None);
-					if inbound_chan.funding.is_colored() {
-						match handle_funding(&msg.temporary_channel_id, msg.funding_txid.to_string(), &self.ldk_data_dir, inbound_chan.funding.push_asset_amount(), self.rgb_kv_store.as_ref()) {
-							Ok(()) => (),
-							Err(e) => {
-								// at this point the channel initiator already transitioned its channel to the funded channel ID
-								let mut chan = Channel::from(inbound_chan);
-								let funding_txo = OutPoint { txid: msg.funding_txid, index: msg.funding_output_index };
-								chan.context_mut().channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
-								return Err(convert_channel_err!(self, peer_state, e, &mut chan).1);
-							},
-						}
-					}
-					match inbound_chan.funding_created(msg, best_block, &self.signer_provider, &&logger) {
-						Ok(res) => res,
-						Err((inbound_chan, err)) => {
-							// We've already removed this inbound channel from the map in `PeerState`
-							// above so at this point we just need to clean up any lingering entries
-							// concerning this channel as it is safe to do so.
-							debug_assert!(matches!(err, ChannelError::Close(_)));
-							let mut chan = Channel::from(inbound_chan);
-							return Err(convert_channel_err!(self, peer_state, err, &mut chan).1);
-						},
-					}
-				},
+				Some(Ok(inbound_chan)) => inbound_chan,
 				Some(Err(mut chan)) => {
-					let err_msg = format!("Got an unexpected funding_created message from peer with counterparty_node_id {}", counterparty_node_id);
-					let err = ChannelError::close(err_msg);
+					let err = ChannelError::close(format!("Got an unexpected funding_created message from peer with counterparty_node_id {}", counterparty_node_id));
 					return Err(convert_channel_err!(self, peer_state, err, &mut chan).1);
 				},
-				None => return Err(MsgHandleErrInternal::send_err_msg_no_close(format!("Got a message for a channel from the wrong node! No such channel for the passed counterparty_node_id {}", counterparty_node_id), msg.temporary_channel_id))
-			};
+				None => return Err(MsgHandleErrInternal::send_err_msg_no_close(format!("Got a message for a channel from the wrong node! No such channel for the passed counterparty_node_id {}", counterparty_node_id), msg.temporary_channel_id)),
+			}
+		};
+
+		// RGB validation may perform substantial network work. Keep it outside the ChannelManager's
+		// peer-state mutex so local state queries are not blocked. PeerManager serializes this callback
+		// against connection lifecycle changes for the same peer.
+		let funding_acceptance_result = if inbound_chan.funding.is_colored() {
+			Some(prepare_funding(
+				&msg.temporary_channel_id,
+				msg.funding_txid.to_string(),
+				&self.ldk_data_dir,
+				msg.funding_output_index,
+				counterparty_node_id,
+				inbound_chan.funding.push_asset_amount(),
+				self.rgb_kv_store.as_ref(),
+			))
+		} else {
+			None
+		};
+		#[cfg(all(feature = "_rln_test_hooks", feature = "std"))]
+		if matches!(funding_acceptance_result.as_ref(), Some(Ok(_))) {
+			pause_after_rgb_funding_preparation(&msg.temporary_channel_id, &msg.funding_txid);
+		}
+
+		let per_peer_state = self.per_peer_state.read().unwrap();
+		let peer_state_mutex = match per_peer_state.get(counterparty_node_id) {
+			Some(peer_state) => peer_state,
+			None => {
+				if let Some(Ok(acceptance)) = funding_acceptance_result {
+					abort_prepared_funding(acceptance, self.rgb_kv_store.as_ref()).map_err(|error| {
+						MsgHandleErrInternal::send_err_msg_no_close(
+							format!("Peer disappeared and prepared RGB funding could not be rolled back: {error:?}"),
+							msg.temporary_channel_id,
+						)
+					})?;
+				}
+				return Err(MsgHandleErrInternal::send_err_msg_no_close(
+					format!("Peer disconnected during funding acceptance: {counterparty_node_id}"),
+					msg.temporary_channel_id,
+				));
+			},
+		};
+		let mut peer_state_lock = peer_state_mutex.lock().unwrap();
+		let peer_state = &mut *peer_state_lock;
+		let prepared_acceptance = match funding_acceptance_result {
+			Some(Ok(acceptance)) => Some(acceptance),
+			Some(Err(error)) => {
+				let mut chan = Channel::from(inbound_chan);
+				let funding_txo = OutPoint { txid: msg.funding_txid, index: msg.funding_output_index };
+				chan.context_mut().channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
+				return Err(convert_channel_err!(self, peer_state, error, &mut chan).1);
+			},
+			None => None,
+		};
+
+		let promoted_acceptance_key = if let Some(acceptance) = prepared_acceptance {
+			match promote_funding(acceptance, self.rgb_kv_store.as_ref()) {
+				Ok(key) => {
+					#[cfg(all(feature = "_rln_test_hooks", feature = "std"))]
+					pause_after_rgb_funding_promotion(&msg.temporary_channel_id, &msg.funding_txid);
+					Some(key)
+				},
+				Err(error) => {
+					let mut channel = Channel::from(inbound_chan);
+					let funding_txo = OutPoint { txid: msg.funding_txid, index: msg.funding_output_index };
+					channel.context_mut().channel_id = ChannelId::v1_from_funding_outpoint(funding_txo);
+					return Err(convert_channel_err!(self, peer_state, error, &mut channel).1);
+				},
+			}
+		} else {
+			None
+		};
+
+		let logger = WithChannelContext::from(&self.logger, &inbound_chan.context, None);
+		let (mut chan, funding_msg_opt, monitor) = match inbound_chan.funding_created(msg, best_block, &self.signer_provider, &&logger) {
+			Ok(res) => res,
+			Err((inbound_chan, err)) => {
+				if let Some(temporary_channel_id) = promoted_acceptance_key.as_ref() {
+					rollback_funding(temporary_channel_id, &self.ldk_data_dir, self.rgb_kv_store.as_ref())
+						.map_err(|error| MsgHandleErrInternal::send_err_msg_no_close(
+							format!("Failed to roll back rejected RGB funding: {error:?}"),
+							msg.temporary_channel_id,
+						))?;
+				}
+				debug_assert!(matches!(err, ChannelError::Close(_)));
+				let mut chan = Channel::from(inbound_chan);
+				return Err(convert_channel_err!(self, peer_state, err, &mut chan).1);
+			},
+		};
 
 		let funded_channel_id = chan.context.channel_id();
 
 		macro_rules! fail_chan { ($err: expr) => { {
+			if let Some(temporary_channel_id) = promoted_acceptance_key.as_ref() {
+				rollback_funding(temporary_channel_id, &self.ldk_data_dir, self.rgb_kv_store.as_ref())
+					.map_err(|error| MsgHandleErrInternal::send_err_msg_no_close(
+						format!("Failed to roll back invalid RGB funding: {error:?}"),
+						msg.temporary_channel_id,
+					))?;
+			}
 			// Note that at this point we've filled in the funding outpoint on our
 			// channel, but its actually in conflict with another channel. Thus, if
 			// we call `convert_channel_err` immediately (thus calling
@@ -10681,10 +10801,12 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			return Err(convert_channel_err!(self, peer_state, err, &mut chan, UNFUNDED_CHANNEL).1);
 		} } }
 
+		if peer_state.channel_by_id.contains_key(&funded_channel_id) {
+			fail_chan!("Already had channel with the new channel_id");
+		}
+
 		match peer_state.channel_by_id.entry(funded_channel_id) {
-			hash_map::Entry::Occupied(_) => {
-				fail_chan!("Already had channel with the new channel_id");
-			},
+				hash_map::Entry::Occupied(_) => unreachable!("channel ID was checked immediately above"),
 			hash_map::Entry::Vacant(e) => {
 				let monitor_res = self.chain_monitor.watch_channel(monitor.channel_id(), monitor);
 				if let Ok(persist_state) = monitor_res {
@@ -18514,7 +18636,6 @@ where
 			highest_seen_timestamp: AtomicUsize::new(highest_seen_timestamp as usize),
 
 			per_peer_state: FairRwLock::new(per_peer_state),
-
 			#[cfg(not(any(test, feature = "_externalize_tests")))]
 			monitor_update_type: AtomicUsize::new(0),
 
