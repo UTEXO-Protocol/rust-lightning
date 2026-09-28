@@ -294,6 +294,7 @@ async fn _accept_transfer(
 			indexer_url,
 			skip_consistency_check: true,
 			vanilla_sync_lookback: VANILLA_SYNC_LOOKBACK,
+			eth_rpc_url: None,
 		})?;
 		let (consignment, assignments, media_digests) = wallet.accept_transfer_consignment(
 			online,
