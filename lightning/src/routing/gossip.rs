@@ -862,7 +862,7 @@ where
 			msg: GossipTimestampFilter {
 				chain_hash: self.network_graph.chain_hash,
 				first_timestamp: gossip_start_time as u32, // 2106 issue!
-				timestamp_range: u32::max_value(),
+				timestamp_range: u32::MAX,
 			},
 		});
 		Ok(())
@@ -1198,8 +1198,8 @@ impl Readable for ChannelInfo {
 				announcement_received_time,
 				(default_value, 0)
 			),
-			node_one_counter: u32::max_value(),
-			node_two_counter: u32::max_value(),
+			node_one_counter: u32::MAX,
+			node_two_counter: u32::MAX,
 			contract_id: _init_tlv_based_struct_field!(contract_id, option),
 		})
 	}
@@ -1361,7 +1361,7 @@ impl EffectiveCapacity {
 			EffectiveCapacity::AdvertisedMaxHTLC { amount_msat } => *amount_msat,
 			EffectiveCapacity::Total { capacity_msat, .. } => *capacity_msat,
 			EffectiveCapacity::HintMaxHTLC { amount_msat } => *amount_msat,
-			EffectiveCapacity::Infinite => u64::max_value(),
+			EffectiveCapacity::Infinite => u64::MAX,
 			EffectiveCapacity::Unknown => UNKNOWN_CHANNEL_CAPACITY_MSAT,
 		}
 	}
@@ -1641,7 +1641,7 @@ impl Readable for NodeInfo {
 		Ok(NodeInfo {
 			announcement_info: announcement_info_wrap.map(|w| w.0),
 			channels,
-			node_counter: u32::max_value(),
+			node_counter: u32::MAX,
 		})
 	}
 }
@@ -1698,7 +1698,7 @@ where
 		let nodes_count: u64 = Readable::read(reader)?;
 		// There shouldn't be anywhere near `u32::MAX` nodes, and we need some headroom to insert
 		// new nodes during sync, so reject any graphs claiming more than `u32::MAX / 2` nodes.
-		if nodes_count > u32::max_value() as u64 / 2 {
+		if nodes_count > u32::MAX as u64 / 2 {
 			return Err(DecodeError::InvalidValue);
 		}
 		let mut nodes = IndexedMap::with_capacity(NODE_COUNT_ESTIMATE);
@@ -1814,7 +1814,7 @@ where
 			let nodes = self.nodes.read().unwrap();
 			let removed_node_counters = self.removed_node_counters.lock().unwrap();
 			let next_counter = self.next_node_counter.load(Ordering::Acquire);
-			assert!(next_counter < (u32::max_value() as usize) / 2);
+			assert!(next_counter < (u32::MAX as usize) / 2);
 			let mut used_node_counters = vec![0u8; next_counter / 8 + 1];
 
 			for counter in removed_node_counters.iter() {
@@ -2047,8 +2047,8 @@ where
 			capacity_sats,
 			announcement_message: None,
 			announcement_received_time: timestamp,
-			node_one_counter: u32::max_value(),
-			node_two_counter: u32::max_value(),
+			node_one_counter: u32::MAX,
+			node_two_counter: u32::MAX,
 			contract_id: None,
 		};
 
@@ -2240,8 +2240,8 @@ where
 				None
 			},
 			announcement_received_time,
-			node_one_counter: u32::max_value(),
-			node_two_counter: u32::max_value(),
+			node_one_counter: u32::MAX,
+			node_two_counter: u32::MAX,
 			contract_id: msg.contract_id,
 		};
 
@@ -2373,7 +2373,7 @@ where
 	pub fn remove_stale_channels_and_tracking_with_time(&self, current_time_unix: u64) {
 		let mut channels = self.channels.write().unwrap();
 		// Time out if we haven't received an update in at least 14 days.
-		if current_time_unix > u32::max_value() as u64 {
+		if current_time_unix > u32::MAX as u64 {
 			return;
 		} // Remove by 2106
 		if current_time_unix < STALE_CHANNEL_UPDATE_AGE_LIMIT_SECS {
@@ -3877,7 +3877,7 @@ pub(crate) mod tests {
 						(msg.first_timestamp as u64)
 							< expected_timestamp - 60 * 60 * 24 * 7 * 2 + 10
 					);
-					assert_eq!(msg.timestamp_range, u32::max_value());
+					assert_eq!(msg.timestamp_range, u32::MAX);
 				},
 				_ => panic!("Expected MessageSendEvent::SendChannelRangeQuery"),
 			};

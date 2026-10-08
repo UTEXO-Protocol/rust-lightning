@@ -677,7 +677,7 @@ impl Readable for Route {
 		let path_count: u64 = Readable::read(reader)?;
 		if path_count == 0 { return Err(DecodeError::InvalidValue); }
 		let mut paths = Vec::with_capacity(cmp::min(path_count, 128) as usize);
-		let mut min_final_cltv_expiry_delta = u32::max_value();
+		let mut min_final_cltv_expiry_delta = u32::MAX;
 		for _ in 0..path_count {
 			let hop_count: u8 = Readable::read(reader)?;
 			let mut hops: Vec<RouteHop> = Vec::with_capacity(hop_count as usize);
@@ -2015,7 +2015,7 @@ fn max_htlc_from_capacity(capacity: EffectiveCapacity, max_channel_saturation_po
 	let saturation_shift: u32 = max_channel_saturation_power_of_half as u32;
 	match capacity {
 		EffectiveCapacity::ExactLiquidity { liquidity_msat } => liquidity_msat,
-		EffectiveCapacity::Infinite => u64::max_value(),
+		EffectiveCapacity::Infinite => u64::MAX,
 		EffectiveCapacity::Unknown => EffectiveCapacity::Unknown.as_msat(),
 		EffectiveCapacity::AdvertisedMaxHTLC { amount_msat } =>
 			amount_msat.checked_shr(saturation_shift).unwrap_or(0),
@@ -2133,7 +2133,7 @@ impl<'a> PaymentPath<'a> {
 	}
 
 	fn get_path_penalty_msat(&self) -> u64 {
-		self.hops.first().map(|h| h.0.path_penalty_msat).unwrap_or(u64::max_value())
+		self.hops.first().map(|h| h.0.path_penalty_msat).unwrap_or(u64::MAX)
 	}
 
 	fn get_total_fee_paid_msat(&self) -> u64 {
@@ -2315,7 +2315,7 @@ fn compute_fees(amount_msat: u64, channel_fees: RoutingFees) -> Option<u64> {
 #[rustfmt::skip]
 fn compute_fees_saturating(amount_msat: u64, channel_fees: RoutingFees) -> u64 {
 	amount_msat.checked_mul(channel_fees.proportional_millionths as u64)
-		.map(|prop| prop / 1_000_000).unwrap_or(u64::max_value())
+		.map(|prop| prop / 1_000_000).unwrap_or(u64::MAX)
 		.saturating_add(channel_fees.base_msat as u64)
 }
 
@@ -2575,7 +2575,7 @@ where L::Target: Logger {
 			|info| info.features().supports_basic_mpp()))
 	} else { false };
 
-	let max_total_routing_fee_msat = route_params.max_total_routing_fee_msat.unwrap_or(u64::max_value());
+	let max_total_routing_fee_msat = route_params.max_total_routing_fee_msat.unwrap_or(u64::MAX);
 
 	let first_hop_count = first_hops.map(|hops| hops.len()).unwrap_or(0);
 	log_trace!(logger, "Searching for a route from payer {} to {} {} MPP and {} first hops {}overriding the network graph of {} nodes and {} channels with a fee limit of {} msat",
@@ -2974,11 +2974,11 @@ where L::Target: Logger {
 							*dist_entry = Some(PathBuildingHop {
 								candidate: $candidate.clone(),
 								fee_msat: 0,
-								next_hops_fee_msat: u64::max_value(),
-								hop_use_fee_msat: u64::max_value(),
-								total_fee_msat: u64::max_value(),
+								next_hops_fee_msat: u64::MAX,
+								hop_use_fee_msat: u64::MAX,
+								total_fee_msat: u64::MAX,
 								path_htlc_minimum_msat,
-								path_penalty_msat: u64::max_value(),
+								path_penalty_msat: u64::MAX,
 								was_processed: false,
 								is_first_hop_target: false,
 								is_last_hop_target: false,
@@ -3286,15 +3286,15 @@ where L::Target: Logger {
 				candidate: CandidateRouteHop::FirstHop(FirstHopCandidate {
 					details: &chans[0],
 					payer_node_id: &our_node_id,
-					target_node_counter: u32::max_value(),
-					payer_node_counter: u32::max_value(),
+					target_node_counter: u32::MAX,
+					payer_node_counter: u32::MAX,
 				}),
 				fee_msat: 0,
-				next_hops_fee_msat: u64::max_value(),
-				hop_use_fee_msat: u64::max_value(),
-				total_fee_msat: u64::max_value(),
-				path_htlc_minimum_msat: u64::max_value(),
-				path_penalty_msat: u64::max_value(),
+				next_hops_fee_msat: u64::MAX,
+				hop_use_fee_msat: u64::MAX,
+				total_fee_msat: u64::MAX,
+				path_htlc_minimum_msat: u64::MAX,
+				path_penalty_msat: u64::MAX,
 				was_processed: false,
 				is_first_hop_target: true,
 				is_last_hop_target: false,
@@ -3319,11 +3319,11 @@ where L::Target: Logger {
 				*entry = Some(PathBuildingHop {
 					candidate: candidates[0].clone(),
 					fee_msat: 0,
-					next_hops_fee_msat: u64::max_value(),
-					hop_use_fee_msat: u64::max_value(),
-					total_fee_msat: u64::max_value(),
-					path_htlc_minimum_msat: u64::max_value(),
-					path_penalty_msat: u64::max_value(),
+					next_hops_fee_msat: u64::MAX,
+					hop_use_fee_msat: u64::MAX,
+					total_fee_msat: u64::MAX,
+					path_htlc_minimum_msat: u64::MAX,
+					path_penalty_msat: u64::MAX,
 					was_processed: false,
 					is_first_hop_target: false,
 					is_last_hop_target: true,
@@ -3428,7 +3428,7 @@ where L::Target: Logger {
 			// traversing the graph and arrange the path out of what we found.
 			if node_counter == payer_node_counter {
 				let mut new_entry = dist[payer_node_counter as usize].take().unwrap();
-				let mut ordered_hops: Vec<(PathBuildingHop, NodeFeatures)> = vec!((new_entry.clone(), default_node_features.clone()));
+				let mut ordered_hops: Vec<(PathBuildingHop, NodeFeatures)> = vec![(new_entry.clone(), default_node_features.clone())];
 
 				'path_walk: loop {
 					let mut features_set = false;
@@ -3526,7 +3526,7 @@ where L::Target: Logger {
 					// we'll probably end up picking the same path again on the next iteration.
 					// Decrease the available liquidity of a hop in the middle of the path.
 					let victim_candidate = &payment_path.hops[(payment_path.hops.len()) / 2].0.candidate;
-					let exhausted = u64::max_value();
+					let exhausted = u64::MAX;
 					log_trace!(logger,
 						"Disabling route candidate {} for future path building iterations to avoid duplicates.",
 						LoggedCandidateHop(victim_candidate));
@@ -3912,7 +3912,7 @@ fn build_route_from_hops_internal<L: Deref>(
 					break;
 				}
 			}
-			u64::max_value()
+			u64::MAX
 		}
 	}
 
@@ -6615,8 +6615,8 @@ mod tests {
 			cltv_expiry_delta: (5 << 4) | 5,
 			htlc_minimum_msat: 0,
 			htlc_maximum_msat: 99_000,
-			fee_base_msat: u32::max_value(),
-			fee_proportional_millionths: u32::max_value(),
+			fee_base_msat: u32::MAX,
+			fee_proportional_millionths: u32::MAX,
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
@@ -6628,8 +6628,8 @@ mod tests {
 			cltv_expiry_delta: (5 << 4) | 3,
 			htlc_minimum_msat: 0,
 			htlc_maximum_msat: 99_000,
-			fee_base_msat: u32::max_value(),
-			fee_proportional_millionths: u32::max_value(),
+			fee_base_msat: u32::MAX,
+			fee_proportional_millionths: u32::MAX,
 			excess_data: Vec::new()
 		});
 		update_channel(&gossip_sync, &secp_ctx, &privkeys[1], UnsignedChannelUpdate {
@@ -7282,7 +7282,7 @@ mod tests {
 		type ScoreParams = ();
 		#[rustfmt::skip]
 		fn channel_penalty_msat(&self, candidate: &CandidateRouteHop, _: ChannelUsage, _score_params:&Self::ScoreParams) -> u64 {
-			if candidate.short_channel_id() == Some(self.short_channel_id) { u64::max_value()  } else { 0  }
+			if candidate.short_channel_id() == Some(self.short_channel_id) { u64::MAX  } else { 0  }
 		}
 	}
 
@@ -7300,7 +7300,7 @@ mod tests {
 		type ScoreParams = ();
 		#[rustfmt::skip]
 		fn channel_penalty_msat(&self, candidate: &CandidateRouteHop, _: ChannelUsage, _score_params:&Self::ScoreParams) -> u64 {
-			if candidate.target() == Some(self.node_id) { u64::max_value() } else { 0 }
+			if candidate.target() == Some(self.node_id) { u64::MAX } else { 0 }
 		}
 	}
 
