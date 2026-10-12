@@ -52,6 +52,9 @@ pub const STATIC_BLINDING: u64 = 777;
 pub const BITCOIN_NETWORK_FNAME: &str = "bitcoin_network";
 /// Name of the file containing the electrum URL
 pub const INDEXER_URL_FNAME: &str = "indexer_url";
+/// KVStore configuration key for the Ethereum RPC used to validate BFA funding consignments.
+/// Missing or empty values disable BFA support.
+pub const ETH_RPC_URL_FNAME: &str = "eth_rpc_url";
 /// Name of the file containing the account-level xPub of the vanilla-side of the wallet
 pub const WALLET_ACCOUNT_XPUB_VANILLA_FNAME: &str = "wallet_account_xpub_vanilla";
 /// Name of the file containing the account-level xPub of the colored-side of the wallet
@@ -184,9 +187,58 @@ fn _get_reuse_addresses(kv_store: &dyn KVStoreSync) -> bool {
 	kv_store.read_config(WALLET_REUSE_ADDRESSES_FNAME).map(|v| v == "true").unwrap_or(false)
 }
 
+fn _get_eth_rpc_url(kv_store: &dyn KVStoreSync) -> Option<String> {
+	match kv_store.read_config(ETH_RPC_URL_FNAME) {
+		Ok(url) => Some(url).filter(|url| !url.is_empty()),
+		Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+		Err(e) => panic!("cannot read Ethereum RPC configuration: {e}"),
+	}
+}
+
+#[cfg(test)]
+mod bfa_config_tests {
+	use super::*;
+	use crate::util::test_utils::TestStore;
+
+	#[test]
+	fn legacy_and_disabled_wallets_do_not_enable_bfa() {
+		let store = TestStore::new(false);
+		assert_eq!(_get_eth_rpc_url(&store), None);
+		store.write_config(ETH_RPC_URL_FNAME, "http://127.0.0.1:8545");
+		assert_eq!(_get_eth_rpc_url(&store).as_deref(), Some("http://127.0.0.1:8545"));
+		store.write_config(ETH_RPC_URL_FNAME, "");
+		assert_eq!(_get_eth_rpc_url(&store), None);
+	}
+
+	#[test]
+	fn bfa_schema_is_opt_in_on_each_network() {
+		for network in [BitcoinNetwork::Regtest, BitcoinNetwork::Signet, BitcoinNetwork::Mainnet] {
+			assert!(!supported_asset_schemas(network, false).contains(&AssetSchema::Bfa));
+			assert!(supported_asset_schemas(network, true).contains(&AssetSchema::Bfa));
+			assert_eq!(
+				supported_asset_schemas(network, true).contains(&AssetSchema::Ifa),
+				network != BitcoinNetwork::Mainnet
+			);
+		}
+	}
+}
+
+/// Schemas supported by both the node wallet and its Lightning RGB wallets.
+/// BFA requires an Ethereum RPC endpoint for bridge validation; IFA is unavailable on mainnet.
+pub fn supported_asset_schemas(bitcoin_network: BitcoinNetwork, bfa: bool) -> Vec<AssetSchema> {
+	let mut schemas = vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda];
+	if bitcoin_network != BitcoinNetwork::Mainnet {
+		schemas.push(AssetSchema::Ifa);
+	}
+	if bfa {
+		schemas.push(AssetSchema::Bfa);
+	}
+	schemas
+}
+
 fn _new_rgb_wallet(
 	data_dir: String, bitcoin_network: BitcoinNetwork, account_xpub_vanilla: String,
-	account_xpub_colored: String, master_fingerprint: String, reuse_addresses: bool,
+	account_xpub_colored: String, master_fingerprint: String, reuse_addresses: bool, bfa: bool,
 ) -> Wallet {
 	let keys = SinglesigKeys {
 		account_xpub_vanilla,
@@ -202,12 +254,7 @@ fn _new_rgb_wallet(
 			bitcoin_network,
 			database_type: DatabaseType::Sqlite,
 			max_allocations_per_utxo: 1,
-			supported_schemas: vec![
-				AssetSchema::Nia,
-				AssetSchema::Cfa,
-				AssetSchema::Uda,
-				AssetSchema::Ifa,
-			],
+			supported_schemas: supported_asset_schemas(bitcoin_network, bfa),
 			reuse_addresses,
 		},
 		keys,
@@ -235,6 +282,7 @@ fn _get_wallet_data(
 }
 
 async fn _get_rgb_wallet(ldk_data_dir: &Path, kv_store: &dyn KVStoreSync) -> Wallet {
+	let bfa = _get_eth_rpc_url(kv_store).is_some();
 	let (
 		data_dir,
 		bitcoin_network,
@@ -251,6 +299,7 @@ async fn _get_rgb_wallet(ldk_data_dir: &Path, kv_store: &dyn KVStoreSync) -> Wal
 			account_xpub_colored,
 			master_fingerprint,
 			reuse_addresses,
+			bfa,
 		)
 	})
 	.await
@@ -279,6 +328,7 @@ async fn _accept_transfer(
 		reuse_addresses,
 	) = _get_wallet_data(ldk_data_dir, kv_store);
 	let indexer_url = _get_indexer_url(kv_store);
+	let eth_rpc_url = _get_eth_rpc_url(kv_store);
 	// the consignment is received from the channel counterparty over the p2p link and written to disk
 	let consignment_path = ldk_data_dir.join(format!("consignment_{funding_txid}"));
 	tokio::task::spawn_blocking(move || {
@@ -289,12 +339,13 @@ async fn _accept_transfer(
 			account_xpub_colored,
 			master_fingerprint,
 			reuse_addresses,
+			eth_rpc_url.is_some(),
 		);
 		let online = wallet.go_online(OnlineOptions {
 			indexer_url,
 			skip_consistency_check: true,
 			vanilla_sync_lookback: VANILLA_SYNC_LOOKBACK,
-			eth_rpc_url: None,
+			eth_rpc_url,
 		})?;
 		let (consignment, assignments, media_digests) = wallet.accept_transfer_consignment(
 			online,
