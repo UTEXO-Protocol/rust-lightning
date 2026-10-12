@@ -59,7 +59,7 @@ amplify = "4.8"
 bincode = "1.3"
 rgb-strict-encoding = "1.0.1"
 futures = "0.3"
-rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", rev = "840e22a896f531bd292b5c855e2fc4ba00c51b48", default-features = false }
+rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", rev = "4d65421eb7ccfa7bd1f77f7d26de53e25ad2571a", default-features = false }
 serde = { version = "^1.0", features = [
     "derive",
 ] }

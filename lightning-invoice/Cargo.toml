@@ -24,7 +24,7 @@ serde = { version = "1.0", optional = true, default-features = false, features =
 bitcoin = { version = "0.32.2", default-features = false, features = ["secp-recovery"] }
 
 # RGB and related
-rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", rev = "840e22a896f531bd292b5c855e2fc4ba00c51b48", default-features = false }
+rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", rev = "4d65421eb7ccfa7bd1f77f7d26de53e25ad2571a", default-features = false }
 
 [dev-dependencies]
 serde_json = { version = "1"}
