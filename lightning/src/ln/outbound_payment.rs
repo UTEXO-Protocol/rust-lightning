@@ -947,8 +947,29 @@ impl OutboundPayments {
 			payment_id, None, &onion_session_privs, false, node_signer, best_block_height,
 			&send_payment_along_path
 		);
-		log_info!(logger, "Sending spontaneous payment with id {} and hash {} returned {:?}",
-			payment_id, payment_hash, res);
+		match &res {
+			Ok(()) => {
+				log_info!(logger,
+					"Sending spontaneous payment with id {} and hash {} succeeded",
+					payment_id, payment_hash);
+			},
+			Err(PaymentSendFailure::PartialFailure { .. }) => {
+				log_info!(logger,
+					"Sending spontaneous payment with id {} and hash {} is awaiting durable channel state",
+					payment_id, payment_hash);
+			},
+			Err(error) => {
+				log_error!(logger,
+					"Sending spontaneous payment with id {} and hash {} failed: {:?}",
+					payment_id, payment_hash, error);
+			},
+		}
+		if matches!(res, Err(PaymentSendFailure::PartialFailure { .. })) {
+			// At least one path was accepted by the channel state machine. In particular,
+			// MonitorUpdateInProgress means the HTLC is held until its monitor update is durable.
+			// Reporting a retryable error could make the caller submit the payment twice.
+			return Ok(());
+		}
 		if let Err(ref e) = res {
 			self.remove_outbound_if_all_failed(payment_id, e);
 			if let PaymentSendFailure::AllFailedResendSafe(_) = e {
@@ -2961,6 +2982,62 @@ mod tests {
 			((1 << 16) + 3, vec![42; 32]),
 		];
 		assert!(onion_fields.with_custom_tlvs(good_tlvs).is_ok());
+	}
+
+	#[test]
+	#[rustfmt::skip]
+	fn spontaneous_route_accepts_monitor_update_in_progress_as_in_flight() {
+		let logger = test_utils::TestLogger::new();
+		let logger_ref = &logger;
+		let log = WithContext::from(&logger_ref, None, None, Some(PaymentHash([1; 32])));
+		let outbound_payments = OutboundPayments::new(
+			new_hash_map(),
+			Arc::new(test_utils::TestStore::new(false)),
+		);
+		let keys_manager = test_utils::TestKeysInterface::new(&[2; 32], Network::Testnet);
+		let secp_ctx = Secp256k1::new();
+		let receiver_pk = PublicKey::from_secret_key(
+			&secp_ctx, &SecretKey::from_slice(&[3; 32]).unwrap(),
+		);
+		let payment_preimage = PaymentPreimage([4; 32]);
+		let payment_hash = payment_preimage.into();
+		let payment_id = PaymentId([5; 32]);
+		let route = Route {
+			paths: vec![Path {
+				hops: vec![RouteHop {
+					payment_amount: 1_000,
+					rgb_payment: None,
+					pubkey: receiver_pk,
+					node_features: NodeFeatures::empty(),
+					short_channel_id: 42,
+					channel_features: ChannelFeatures::empty(),
+					fee_msat: 1_000,
+					cltv_expiry_delta: 18,
+					maybe_announced_channel: false,
+				}],
+				blinded_tail: None,
+			}],
+			route_params: None,
+		};
+		let pending_events = Mutex::new(VecDeque::new());
+
+		let result = outbound_payments.send_spontaneous_payment_with_route(
+			route,
+			payment_hash,
+			payment_preimage,
+			RecipientOnionFields::spontaneous_empty(),
+			payment_id,
+			&&keys_manager,
+			&&keys_manager,
+			0,
+			&pending_events,
+			|_| Err(APIError::MonitorUpdateInProgress),
+			&log,
+		);
+
+		assert!(result.is_ok());
+		assert!(pending_events.lock().unwrap().is_empty());
+		assert!(outbound_payments.pending_outbound_payments.lock().unwrap().contains_key(&payment_id));
 	}
 
 	#[test]
