@@ -69,7 +69,7 @@ use crate::types::features::ChannelTypeFeatures;
 use crate::types::payment::{PaymentHash, PaymentPreimage};
 use crate::util::byte_utils;
 use crate::util::logger::{Logger, WithContext};
-use crate::util::persist::MonitorName;
+use crate::util::persist::{KVStoreSync, MonitorName};
 use crate::util::ser::{
 	MaybeReadable, Readable, ReadableArgs, RequiredWrapper, UpgradableRequired, Writeable, Writer,
 	U48,
@@ -79,6 +79,7 @@ use crate::util::ser::{
 use crate::prelude::*;
 
 use crate::io::{self, Error};
+use crate::sync::Arc;
 use crate::sync::Mutex;
 use core::ops::Deref;
 use core::{cmp, mem};
@@ -1872,7 +1873,8 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 		commitment_transaction_number_obscure_factor: u64,
 		initial_holder_commitment_tx: HolderCommitmentTransaction, best_block: BestBlock,
 		counterparty_node_id: PublicKey, channel_id: ChannelId,
-		is_manual_broadcast: bool,
+		is_manual_broadcast: bool, ldk_data_dir: Option<String>,
+		rgb_kv_store: Option<Arc<dyn KVStoreSync + Send + Sync>>,
 	) -> ChannelMonitor<Signer> {
 
 		assert!(commitment_transaction_number_obscure_factor <= (1 << 48));
@@ -1895,6 +1897,7 @@ impl<Signer: EcdsaChannelSigner> ChannelMonitor<Signer> {
 		let onchain_tx_handler = OnchainTxHandler::new(
 			channel_parameters.channel_value_satoshis, channel_keys_id, destination_script.into(),
 			keys, channel_parameters.clone(), initial_holder_commitment_tx.clone(), secp_ctx,
+			ldk_data_dir, rgb_kv_store,
 		);
 
 		let funding_outpoint = channel_parameters.funding_outpoint
@@ -6419,10 +6422,14 @@ where
 
 const MAX_ALLOC_SIZE: usize = 64 * 1024;
 
-impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP)>
+impl<'a, 'b, ES: EntropySource, SP: SignerProvider>
+	ReadableArgs<(&'a ES, &'b SP, Option<String>, Option<Arc<dyn KVStoreSync + Send + Sync>>)>
 	for (BlockHash, ChannelMonitor<SP::EcdsaSigner>)
 {
-	fn read<R: io::Read>(reader: &mut R, args: (&'a ES, &'b SP)) -> Result<Self, DecodeError> {
+	fn read<R: io::Read>(
+		reader: &mut R,
+		args: (&'a ES, &'b SP, Option<String>, Option<Arc<dyn KVStoreSync + Send + Sync>>),
+	) -> Result<Self, DecodeError> {
 		match <Option<Self>>::read(reader, args) {
 			Ok(Some(res)) => Ok(res),
 			Ok(None) => Err(DecodeError::UnknownRequiredFeature),
@@ -6431,11 +6438,12 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 	}
 }
 
-impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP)>
+impl<'a, 'b, ES: EntropySource, SP: SignerProvider>
+	ReadableArgs<(&'a ES, &'b SP, Option<String>, Option<Arc<dyn KVStoreSync + Send + Sync>>)>
 	for Option<(BlockHash, ChannelMonitor<SP::EcdsaSigner>)>
 {
 	#[rustfmt::skip]
-	fn read<R: io::Read>(reader: &mut R, args: (&'a ES, &'b SP)) -> Result<Self, DecodeError> {
+	fn read<R: io::Read>(reader: &mut R, args: (&'a ES, &'b SP, Option<String>, Option<Arc<dyn KVStoreSync + Send + Sync>>)) -> Result<Self, DecodeError> {
 		macro_rules! unwrap_obj {
 			($key: expr) => {
 				match $key {
@@ -6445,7 +6453,7 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 			}
 		}
 
-		let (entropy_source, signer_provider) = args;
+		let (entropy_source, signer_provider, ldk_data_dir_arg, rgb_kv_store_arg) = args;
 
 		let _ver = read_ver_prefix!(reader, SERIALIZATION_VERSION);
 
@@ -6620,7 +6628,7 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 			}
 		}
 		let onchain_tx_handler: OnchainTxHandler<SP::EcdsaSigner> = ReadableArgs::read(
-			reader, (entropy_source, signer_provider, channel_value_satoshis, channel_keys_id)
+			reader, (entropy_source, signer_provider, channel_value_satoshis, channel_keys_id, ldk_data_dir_arg, rgb_kv_store_arg)
 		)?;
 
 		let lockdown_from_offchain = Readable::read(reader)?;
@@ -6966,8 +6974,8 @@ mod tests {
 			&[(0, broadcast_tx)], conf_height);
 
 		let (_, pre_update_monitor) = <(BlockHash, ChannelMonitor<_>)>::read(
-						&mut io::Cursor::new(&get_monitor!(nodes[1], channel.2).encode()),
-						(&nodes[1].keys_manager.backing, &nodes[1].keys_manager.backing)).unwrap();
+					&mut io::Cursor::new(&get_monitor!(nodes[1], channel.2).encode()),
+					(&nodes[1].keys_manager.backing, &nodes[1].keys_manager.backing, None)).unwrap();
 
 		// If the ChannelManager tries to update the channel, however, the ChainMonitor will pass
 		// the update through to the ChannelMonitor which will refuse it (as the channel is closed).
@@ -7121,7 +7129,7 @@ mod tests {
 		let monitor = ChannelMonitor::new(
 			Secp256k1::new(), keys, Some(shutdown_script.into_inner()), 0, &ScriptBuf::new(),
 			&channel_parameters, true, 0, HolderCommitmentTransaction::dummy(0, funding_outpoint, Vec::new()),
-			best_block, dummy_key, channel_id, false,
+			best_block, dummy_key, channel_id, false, None, None,
 		);
 
 		let nondust_htlcs = preimages_slice_to_htlcs!(preimages[0..10]);
@@ -7382,7 +7390,7 @@ mod tests {
 		let monitor = ChannelMonitor::new(
 			Secp256k1::new(), keys, Some(shutdown_script.into_inner()), 0, &ScriptBuf::new(),
 			&channel_parameters, true, 0, HolderCommitmentTransaction::dummy(0, funding_outpoint, Vec::new()),
-			best_block, dummy_key, channel_id, false,
+			best_block, dummy_key, channel_id, false, None, None,
 		);
 
 		let chan_id = monitor.inner.lock().unwrap().channel_id();

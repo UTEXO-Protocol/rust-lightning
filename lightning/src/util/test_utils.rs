@@ -536,7 +536,7 @@ impl<'a> TestChainMonitor<'a> {
 		monitor.write(&mut w).unwrap();
 		let new_monitor = <(BlockHash, ChannelMonitor<TestChannelSigner>)>::read(
 			&mut io::Cursor::new(&w.0),
-			(self.keys_manager, self.keys_manager),
+			(self.keys_manager, self.keys_manager, None, None),
 		)
 		.unwrap()
 		.1;
@@ -573,7 +573,7 @@ impl<'a> chain::Watch<TestChannelSigner> for TestChainMonitor<'a> {
 		monitor.write(&mut w).unwrap();
 		let new_monitor = <(BlockHash, ChannelMonitor<TestChannelSigner>)>::read(
 			&mut io::Cursor::new(&w.0),
-			(self.keys_manager, self.keys_manager),
+			(self.keys_manager, self.keys_manager, None, None),
 		)
 		.unwrap()
 		.1;
@@ -629,7 +629,7 @@ impl<'a> chain::Watch<TestChannelSigner> for TestChainMonitor<'a> {
 		monitor.write(&mut w).unwrap();
 		let new_monitor = <(BlockHash, ChannelMonitor<TestChannelSigner>)>::read(
 			&mut io::Cursor::new(&w.0),
-			(self.keys_manager, self.keys_manager),
+			(self.keys_manager, self.keys_manager, None, None),
 		)
 		.unwrap()
 		.1;

@@ -15,6 +15,7 @@ use crate::ln::types::ChannelId;
 use crate::sign::SignerProvider;
 use crate::types::features::ChannelTypeFeatures;
 use crate::types::payment::PaymentHash;
+use crate::util::logger::Logger;
 use crate::util::persist::KVStoreSync;
 
 use bitcoin::blockdata::transaction::Transaction;
@@ -34,6 +35,7 @@ use rgb_lib::{
 	Fascia, FileContent, RgbTransfer, WitnessOrd,
 };
 use serde::{Deserialize, Serialize};
+use serde_json;
 use strict_encoding::{StrictDeserialize, StrictSerialize};
 use tokio::runtime::Handle;
 
@@ -390,6 +392,18 @@ pub fn is_tx_colored(tx: &Transaction) -> bool {
 	op_return_position(tx).is_some()
 }
 
+/// Read TransferInfo file
+pub fn read_rgb_transfer_info(path: &Path) -> TransferInfo {
+	let serialized_info = fs::read_to_string(path).expect("able to read transfer info file");
+	serde_json::from_str(&serialized_info).expect("valid transfer info")
+}
+
+/// Write TransferInfo file
+pub fn write_rgb_transfer_info(path: &PathBuf, info: &TransferInfo) {
+	let serialized_info = serde_json::to_string(&info).expect("valid transfer info");
+	fs::write(path, serialized_info).expect("able to write transfer info file")
+}
+
 /// Color commitment transaction
 pub(crate) fn color_commitment<SP: Deref>(
 	channel_context: &ChannelContext<SP>, funding_scope: &FundingScope,
@@ -564,13 +578,21 @@ where
 		output_map.insert(vout_p2wsh as u32, vout_p2wsh_amt);
 	}
 
-	let asset_coloring_info = AssetColoringInfo {
-		output_map: output_map.clone(),
-		static_blinding: Some(STATIC_BLINDING),
-	};
+	// Both commitment views are colored on every node, so whichever commitment is
+	// broadcast both nodes hold its allocation: this covers force-close in both
+	// directions and penalties. The blinding is derived per commitment (from the
+	// uncolored txid, identically on both nodes): seals are witness-relative, so a
+	// shared blinding would make sibling transitions content-identical and let
+	// consignment generation pick the never-broadcast witness.
+	let blinding = u64::from_be_bytes(
+		commitment_tx.compute_txid().as_byte_array()[0..8].try_into().expect("fixed-size slice"),
+	);
+
+	let asset_coloring_info =
+		AssetColoringInfo { output_map: output_map.clone(), static_blinding: Some(blinding) };
 	let coloring_info = ColoringInfo {
 		asset_info_map: HashMap::from_iter([(contract_id, asset_coloring_info)]),
-		static_blinding: Some(STATIC_BLINDING),
+		static_blinding: Some(blinding),
 		nonce: None,
 	};
 	let psbt = Psbt::from_unsigned_tx(commitment_tx.clone()).unwrap();
@@ -578,7 +600,9 @@ where
 	let handle = Handle::current();
 	let _ = handle.enter();
 	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
-	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
+	let (fascia, _) = wallet
+		.color_psbt(&mut psbt, coloring_info)
+		.map_err(|e| ChannelError::close(format!("RGB commitment coloring failed: {e}")))?;
 	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
 	let modified_tx = match psbt.extract_tx() {
 		Ok(tx) => tx,
@@ -589,19 +613,28 @@ where
 	let txid = modified_tx.compute_txid();
 	commitment_transaction.built = BuiltCommitmentTransaction { transaction: modified_tx, txid };
 
-	wallet.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored)).unwrap();
-
-	// Keep the latest fascia per commitment side so a wallet restored without
-	// an RGB backup can re-consume it and color force-close sweeps.
-	let fascia_key = format!("{}_{}", chan_id, if counterparty { "cp" } else { "local" });
-	let fascia_bytes =
-		fascia.to_strict_serialized::<{ usize::MAX }>().expect("serializable fascia").release();
-	kv_store
-		.write(RGB_PRIMARY_NS, RGB_COMMITMENT_FASCIA_NS, &fascia_key, fascia_bytes)
-		.expect("KVStore write failed");
-
+	// save RGB transfer data to disk
 	let transfer_info = TransferInfo { contract_id, output_map };
-	kv_store.write_rgb_transfer_info(&txid.to_string(), &transfer_info);
+	let transfer_info_path = ldk_data_dir.join(format!("{txid}_transfer_info"));
+	// Deterministic colored txid: an existing transfer info means the identical
+	// transition was already consumed (state rebuild); skip the duplicate consume.
+	if !transfer_info_path.exists() {
+		wallet
+			.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored))
+			.map_err(|e| ChannelError::close(format!("RGB commitment consume failed: {e}")))?;
+
+		// Keep the latest fascia per commitment side so a wallet restored without
+		// an RGB backup can re-consume it and color force-close sweeps.
+		let fascia_key = format!("{}_{}", chan_id, if counterparty { "cp" } else { "local" });
+		let fascia_bytes =
+			fascia.to_strict_serialized::<{ usize::MAX }>().expect("serializable fascia").release();
+		kv_store
+			.write(RGB_PRIMARY_NS, RGB_COMMITMENT_FASCIA_NS, &fascia_key, fascia_bytes)
+			.expect("KVStore write failed");
+
+		kv_store.write_rgb_transfer_info(&txid.to_string(), &transfer_info);
+		write_rgb_transfer_info(&transfer_info_path, &transfer_info);
+	}
 
 	Ok(())
 }
@@ -654,6 +687,167 @@ pub(crate) fn color_htlc(
 	Ok(())
 }
 
+/// Leaves the justice sweep uncolored (burning its RGB) and surfaces why at error level.
+fn uncolored_fallback(
+	logger: &dyn Logger, prev_txid: &str, reason: &str,
+) -> Result<(), ChannelError> {
+	log_error!(
+		logger,
+		"Unable to color justice transaction for {prev_txid}: {reason} \
+		 (falling back to uncolored)",
+	);
+	Ok(())
+}
+
+/// Colors a justice (penalty) transaction with the RGB of the revoked outputs it
+/// spends. Inputs are grouped by spent txid and each `{txid}_transfer_info` is
+/// consulted; inputs without info are logged and left out. With nothing loadable
+/// or a zero total the transaction is left uncolored.
+pub(crate) fn color_claim(
+	claim_tx: &mut Transaction, ldk_data_dir: &Path, kv_store: &dyn KVStoreSync,
+	logger: &dyn Logger,
+) -> Result<(), ChannelError> {
+	let mut prev_txids: Vec<String> = Vec::new();
+	for input in &claim_tx.input {
+		let txid = input.previous_output.txid.to_string();
+		if !prev_txids.contains(&txid) {
+			prev_txids.push(txid);
+		}
+	}
+	let mut transfer_infos: HashMap<String, TransferInfo> = HashMap::new();
+	for prev_txid in &prev_txids {
+		let transfer_info_path = ldk_data_dir.join(format!("{prev_txid}_transfer_info"));
+		let outcome = fs::read_to_string(&transfer_info_path).map_err(|e| e.to_string()).and_then(
+			|serialized_info| {
+				serde_json::from_str::<TransferInfo>(&serialized_info)
+					.map_err(|e| format!("corrupt RGB transfer info for {prev_txid}: {e}"))
+			},
+		);
+		match outcome {
+			Ok(transfer_info) => {
+				transfer_infos.insert(prev_txid.clone(), transfer_info);
+			},
+			Err(e) => {
+				log_error!(
+					logger,
+					"Unable to account RGB for justice inputs spending {prev_txid}: {e}"
+				);
+			},
+		}
+	}
+	if transfer_infos.is_empty() {
+		return uncolored_fallback(logger, &prev_txids.join(", "), "missing RGB transfer info");
+	}
+	let contract_id = transfer_infos.values().next().expect("non-empty map").contract_id;
+	let prev_txid: &str = &prev_txids.join(", ");
+	let total_rgb: u64 = claim_tx
+		.input
+		.iter()
+		.filter_map(|input| {
+			let txid = input.previous_output.txid.to_string();
+			transfer_infos
+				.get(&txid)
+				.and_then(|transfer_info| transfer_info.output_map.get(&input.previous_output.vout))
+		})
+		.sum();
+	if total_rgb == 0 {
+		return uncolored_fallback(logger, prev_txid, "zero RGB assets in transfer info");
+	}
+
+	let output_map = HashMap::from([(0, total_rgb)]);
+	let asset_coloring_info = AssetColoringInfo {
+		output_map: output_map.clone(),
+		static_blinding: Some(STATIC_BLINDING),
+	};
+	let coloring_info = ColoringInfo {
+		asset_info_map: HashMap::from_iter([(contract_id, asset_coloring_info)]),
+		static_blinding: Some(STATIC_BLINDING),
+		nonce: Some(1),
+	};
+
+	let psbt = match Psbt::from_unsigned_tx(claim_tx.clone()) {
+		Ok(p) => p,
+		Err(e) => {
+			return uncolored_fallback(logger, prev_txid, &format!("failed to build PSBT ({e})"))
+		},
+	};
+	let mut rgb_psbt = match RgbLibPsbt::from_str(&psbt.to_string()) {
+		Ok(p) => p,
+		Err(e) => {
+			return uncolored_fallback(
+				logger,
+				prev_txid,
+				&format!("failed to parse RGB PSBT ({e})"),
+			)
+		},
+	};
+	let handle = Handle::current();
+	let _ = handle.enter();
+	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
+	let (fascia, _) = match wallet.color_psbt(&mut rgb_psbt, coloring_info) {
+		Ok(res) => res,
+		Err(e) => {
+			log_error!(
+				logger,
+				"RGB wallet failed to color justice transaction for {}: {e} \
+				 (falling back to uncolored)",
+				prev_txid,
+			);
+			return Ok(());
+		},
+	};
+	let psbt = match Psbt::from_str(&rgb_psbt.to_string()) {
+		Ok(p) => p,
+		Err(e) => {
+			return uncolored_fallback(
+				logger,
+				prev_txid,
+				&format!("failed to serialize colored PSBT ({e})"),
+			)
+		},
+	};
+	let modified_tx = match psbt.extract_tx() {
+		Ok(tx) => tx,
+		Err(ExtractTxError::MissingInputValue { tx }) => tx,
+		Err(e) => {
+			return uncolored_fallback(
+				logger,
+				prev_txid,
+				&format!("failed to extract colored transaction ({e})"),
+			)
+		},
+	};
+	let txid = &modified_tx.compute_txid();
+
+	if let Err(e) = wallet.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored)) {
+		log_error!(
+			logger,
+			"Failed to consume RGB fascia for justice transaction {txid}: {e} \
+			 (falling back to uncolored)",
+		);
+		return Ok(());
+	}
+
+	let transfer_info = TransferInfo { contract_id, output_map };
+	let transfer_info_path = ldk_data_dir.join(format!("{txid}_transfer_info"));
+	write_rgb_transfer_info(&transfer_info_path, &transfer_info);
+	// The daemon's sweeper detects RGB outputs from the KVStore record (not the
+	// file): the claim's transfer info must land there too or the sweep is BTC-only.
+	if let Err(e) = kv_store.write(RGB_PRIMARY_NS, RGB_TRANSFER_INFO_NS, &txid.to_string(), {
+		bincode::serialize(&transfer_info).expect("valid transfer info")
+	}) {
+		log_error!(
+			logger,
+			"Failed to persist RGB transfer info for justice {txid}: {e} \
+			 (RGB would not be sweepable)",
+		);
+		return Ok(());
+	}
+
+	*claim_tx = modified_tx;
+	Ok(())
+}
+
 /// Color closing transaction
 pub(crate) fn color_closing(
 	channel_id: &ChannelId, closing_transaction: &mut ClosingTransaction, ldk_data_dir: &Path,
@@ -701,7 +895,9 @@ pub(crate) fn color_closing(
 	let handle = Handle::current();
 	let _ = handle.enter();
 	let wallet = futures::executor::block_on(_get_rgb_wallet(ldk_data_dir, kv_store));
-	let (fascia, _) = wallet.color_psbt(&mut psbt, coloring_info).unwrap();
+	let (fascia, _) = wallet
+		.color_psbt(&mut psbt, coloring_info)
+		.map_err(|e| ChannelError::close(format!("RGB closing coloring failed: {e}")))?;
 	let psbt = Psbt::from_str(&psbt.to_string()).unwrap();
 	let modified_tx = match psbt.extract_tx() {
 		Ok(tx) => tx,
@@ -712,7 +908,9 @@ pub(crate) fn color_closing(
 	let txid = &modified_tx.compute_txid();
 	closing_transaction.built = modified_tx;
 
-	wallet.consume_fascia(fascia.clone(), Some(WitnessOrd::Ignored)).unwrap();
+	wallet
+		.consume_fascia(fascia, Some(WitnessOrd::Ignored))
+		.map_err(|e| ChannelError::close(format!("RGB closing consume failed: {e}")))?;
 
 	let transfer_info = TransferInfo { contract_id, output_map };
 	kv_store.write_rgb_transfer_info(&txid.to_string(), &transfer_info);

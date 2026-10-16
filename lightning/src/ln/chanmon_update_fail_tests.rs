@@ -89,7 +89,7 @@ fn test_monitor_and_persister_update_fail() {
 			let monitor = nodes[0].chain_monitor.chain_monitor.get_monitor(chan.2).unwrap();
 			let (_, new_monitor) = <(BlockHash, ChannelMonitor<TestChannelSigner>)>::read(
 				&mut &monitor.encode()[..],
-				(nodes[0].keys_manager, nodes[0].keys_manager),
+				(nodes[0].keys_manager, nodes[0].keys_manager, None, None),
 			)
 			.unwrap();
 			assert!(new_monitor == *monitor);
@@ -4919,6 +4919,8 @@ fn native_async_persist() {
 		Arc::clone(&keys_manager),
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
+		None,
+		None,
 	);
 	let chain_source = test_utils::TestChainSource::new(Network::Testnet);
 	let async_chain_monitor = ChainMonitor::new_async_beta(
