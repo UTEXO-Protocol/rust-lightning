@@ -7242,7 +7242,7 @@ pub fn test_update_err_monitor_lockdown() {
 			let new_monitor =
 				<(BlockHash, channelmonitor::ChannelMonitor<TestChannelSigner>)>::read(
 					&mut io::Cursor::new(&monitor.encode()),
-					(nodes[0].keys_manager, nodes[0].keys_manager),
+					(nodes[0].keys_manager, nodes[0].keys_manager, None),
 				)
 				.unwrap()
 				.1;
@@ -7348,7 +7348,7 @@ pub fn test_concurrent_monitor_claim() {
 			let new_monitor =
 				<(BlockHash, channelmonitor::ChannelMonitor<TestChannelSigner>)>::read(
 					&mut io::Cursor::new(&monitor.encode()),
-					(nodes[0].keys_manager, nodes[0].keys_manager),
+					(nodes[0].keys_manager, nodes[0].keys_manager, None),
 				)
 				.unwrap()
 				.1;
@@ -7398,7 +7398,7 @@ pub fn test_concurrent_monitor_claim() {
 			let new_monitor =
 				<(BlockHash, channelmonitor::ChannelMonitor<TestChannelSigner>)>::read(
 					&mut io::Cursor::new(&monitor.encode()),
-					(nodes[0].keys_manager, nodes[0].keys_manager),
+					(nodes[0].keys_manager, nodes[0].keys_manager, None),
 				)
 				.unwrap()
 				.1;
