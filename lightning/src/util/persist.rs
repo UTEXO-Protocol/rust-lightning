@@ -455,7 +455,7 @@ where
 				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
 				&stored_key,
 			)?),
-			(&*entropy_source, &*signer_provider),
+			(&*entropy_source, &*signer_provider, None),
 		) {
 			Ok(Some((block_hash, channel_monitor))) => {
 				let monitor_name = MonitorName::from_str(&stored_key)?;
@@ -627,7 +627,7 @@ where
 	/// implementation for all [`KVStoreSync`]s.
 	pub fn new(
 		kv_store: K, logger: L, maximum_pending_updates: u64, entropy_source: ES,
-		signer_provider: SP, broadcaster: BI, fee_estimator: FE,
+		signer_provider: SP, broadcaster: BI, fee_estimator: FE, ldk_data_dir: Option<String>,
 	) -> Self {
 		// Note that calling the spawner only happens in the `pub(crate)` `spawn_*` methods defined
 		// with additional bounds on `MonitorUpdatingPersisterAsync`. Thus its safe to provide a
@@ -641,6 +641,7 @@ where
 			signer_provider,
 			broadcaster,
 			fee_estimator,
+			ldk_data_dir,
 		))
 	}
 
@@ -823,6 +824,7 @@ struct MonitorUpdatingPersisterAsyncInner<
 	signer_provider: SP,
 	broadcaster: BI,
 	fee_estimator: FE,
+	ldk_data_dir: Option<String>,
 }
 
 impl<K: Deref, S: FutureSpawner, L: Deref, ES: Deref, SP: Deref, BI: Deref, FE: Deref>
@@ -841,6 +843,7 @@ where
 	pub fn new(
 		kv_store: K, future_spawner: S, logger: L, maximum_pending_updates: u64,
 		entropy_source: ES, signer_provider: SP, broadcaster: BI, fee_estimator: FE,
+		ldk_data_dir: Option<String>,
 	) -> Self {
 		MonitorUpdatingPersisterAsync(Arc::new(MonitorUpdatingPersisterAsyncInner {
 			kv_store,
@@ -852,6 +855,7 @@ where
 			signer_provider,
 			broadcaster,
 			fee_estimator,
+			ldk_data_dir,
 		}))
 	}
 
@@ -1096,7 +1100,7 @@ where
 		}
 		match <Option<(BlockHash, ChannelMonitor<<SP::Target as SignerProvider>::EcdsaSigner>)>>::read(
 			&mut monitor_cursor,
-			(&*self.entropy_source, &*self.signer_provider),
+			(&*self.entropy_source, &*self.signer_provider, self.ldk_data_dir.clone()),
 		) {
 			Ok(None) => Ok(None),
 			Ok(Some((blockhash, channel_monitor))) => {
@@ -1600,6 +1604,7 @@ mod tests {
 			&chanmon_cfgs[0].keys_manager,
 			&chanmon_cfgs[0].tx_broadcaster,
 			&chanmon_cfgs[0].fee_estimator,
+			None,
 		);
 		let kv_store_1 = TestStore::new(false);
 		let persister_1 = MonitorUpdatingPersister::new(
@@ -1610,6 +1615,7 @@ mod tests {
 			&chanmon_cfgs[1].keys_manager,
 			&chanmon_cfgs[1].tx_broadcaster,
 			&chanmon_cfgs[1].fee_estimator,
+			None,
 		);
 		let mut node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
 		let chain_mon_0 = test_utils::TestChainMonitor::new(
@@ -1792,6 +1798,7 @@ mod tests {
 				node_cfgs[0].keys_manager,
 				node_cfgs[0].tx_broadcaster,
 				node_cfgs[0].fee_estimator,
+				None,
 			);
 			let monitor_name = added_monitors[0].1.persistence_key();
 			match ro_persister.persist_new_channel(monitor_name, &added_monitors[0].1) {
@@ -1839,6 +1846,7 @@ mod tests {
 			&chanmon_cfgs[0].keys_manager,
 			&chanmon_cfgs[0].tx_broadcaster,
 			&chanmon_cfgs[0].fee_estimator,
+			None,
 		);
 		let kv_store_1 = TestStore::new(false);
 		let persister_1 = MonitorUpdatingPersister::new(
@@ -1849,6 +1857,7 @@ mod tests {
 			&chanmon_cfgs[1].keys_manager,
 			&chanmon_cfgs[1].tx_broadcaster,
 			&chanmon_cfgs[1].fee_estimator,
+			None,
 		);
 		let mut node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
 		let chain_mon_0 = test_utils::TestChainMonitor::new(

@@ -37,6 +37,7 @@ use crate::ln::chan_utils::{
 use crate::ln::channel_keys::{DelayedPaymentBasepoint, HtlcBasepoint};
 use crate::ln::channelmanager::MIN_CLTV_EXPIRY_DELTA;
 use crate::ln::msgs::DecodeError;
+use crate::rgb_utils::color_claim;
 use crate::sign::ecdsa::EcdsaChannelSigner;
 use crate::sign::{ChannelDerivationParameters, HTLCDescriptor};
 use crate::types::features::ChannelTypeFeatures;
@@ -47,6 +48,7 @@ use crate::util::ser::{Readable, ReadableArgs, RequiredWrapper, Writeable, Write
 use crate::io;
 use core::cmp;
 use core::ops::Deref;
+use std::path::Path;
 
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -115,6 +117,10 @@ pub(crate) fn verify_channel_type_features(channel_type_features: &Option<Channe
 
 // number_of_witness_elements + sig_length + revocation_sig + true_length + op_true + witness_script_length + witness_script
 pub(crate) const WEIGHT_REVOKED_OUTPUT: u64 = 1 + 1 + 73 + 1 + 1 + 1 + 77;
+
+// Weight of the RGB OP_RETURN output appended by `color_claim` to justice transactions.
+// value(8) + varint(1) + script(OP_RETURN(1) + OP_PUSHBYTES_32(1) + 32-byte opret commitment) = 43 bytes serialized × 4 (non-witness) = 172 WU.
+const RGB_OPRETURN_OUTPUT_WEIGHT: u64 = 172;
 
 #[cfg(not(any(test, feature = "_test_utils")))]
 /// Height delay at which transactions are fee-bumped/rebroadcasted with a low priority.
@@ -1355,6 +1361,18 @@ impl PackageTemplate {
 			core::cmp::max(current_height, minimum_locktime.unwrap_or(0))
 		}
 	}
+	/// Returns whether every input spends a revoked counterparty output (a justice/penalty
+	/// package claiming a revoked commitment transaction).
+	fn is_justice_package(&self) -> bool {
+		!self.inputs.is_empty()
+			&& self.inputs.iter().all(|(_, d)| {
+				matches!(
+					d,
+					PackageSolvingData::RevokedOutput(..)
+						| PackageSolvingData::RevokedHTLCOutput(..)
+				)
+			})
+	}
 	pub(crate) fn package_weight(&self, destination_script: &Script) -> u64 {
 		let mut inputs_weight = 0;
 		let mut witnesses_weight = 2; // count segwit flags
@@ -1366,7 +1384,12 @@ impl PackageTemplate {
 		// version: 4 bytes ; count_tx_in: 1 byte ; count_tx_out: 1 byte ; lock_time: 4 bytes
 		let transaction_weight = 10 * WITNESS_SCALE_FACTOR;
 		// value: 8 bytes ; var_int: 1 byte ; pk_script: `destination_script.len()`
-		let output_weight = (8 + 1 + destination_script.len()) * WITNESS_SCALE_FACTOR;
+		let mut output_weight = (8 + 1 + destination_script.len()) * WITNESS_SCALE_FACTOR;
+		// Justice (penalty) transactions get an RGB OP_RETURN output appended by `color_claim`.
+		// Account for its weight here so the feerate computation and downstream assert are accurate.
+		if self.is_justice_package() {
+			output_weight += RGB_OPRETURN_OUTPUT_WEIGHT as usize;
+		}
 		(inputs_weight + witnesses_weight + transaction_weight + output_weight) as u64
 	}
 	#[rustfmt::skip]
@@ -1408,6 +1431,17 @@ impl PackageTemplate {
 		};
 		for (outpoint, outp) in self.inputs.iter() {
 			bumped_tx.input.push(outp.as_tx_input(*outpoint));
+		}
+		// Only color justice (penalty) claims: all inputs must be revoked counterparty outputs,
+		// possibly spending more than one revoked transaction (e.g. a revoked commitment and
+		// HTLC transactions spending it). `color_claim` groups the inputs by spent transaction
+		// and loads the matching `{txid}_transfer_info` for each. Coloring needs to happen
+		// before `finalize_input` signs over all outputs so that the RGB OP_RETURN is part of
+		// what gets signed.
+		if self.is_justice_package() {
+			if let Some(ldk_data_dir) = onchain_handler.ldk_data_dir() {
+				let _ = color_claim(&mut bumped_tx, Path::new(ldk_data_dir), logger);
+			}
 		}
 		for (i, (outpoint, out)) in self.inputs.iter().enumerate() {
 			log_debug!(logger, "Adding claiming input for outpoint {}:{}", outpoint.txid, outpoint.vout);
@@ -1776,7 +1810,8 @@ mod tests {
 	use crate::chain::package::{
 		feerate_bump, weight_offered_htlc, weight_received_htlc, CounterpartyOfferedHTLCOutput,
 		CounterpartyReceivedHTLCOutput, HolderFundingOutput, HolderHTLCOutput, PackageSolvingData,
-		PackageTemplate, RevokedHTLCOutput, RevokedOutput, WEIGHT_REVOKED_OUTPUT,
+		PackageTemplate, RevokedHTLCOutput, RevokedOutput, RGB_OPRETURN_OUTPUT_WEIGHT,
+		WEIGHT_REVOKED_OUTPUT,
 	};
 	use crate::chain::Txid;
 	use crate::ln::chan_utils::{
@@ -2187,7 +2222,10 @@ mod tests {
 		{
 			let revk_outp = dumb_revk_output!();
 			let package = PackageTemplate::build_package(fake_txid(1), 0, revk_outp, 0);
-			assert_eq!(package.package_weight(&ScriptBuf::new()),  weight_sans_output + WEIGHT_REVOKED_OUTPUT);
+			assert_eq!(
+				package.package_weight(&ScriptBuf::new()),
+				weight_sans_output + WEIGHT_REVOKED_OUTPUT + RGB_OPRETURN_OUTPUT_WEIGHT
+			);
 		}
 
 		{
