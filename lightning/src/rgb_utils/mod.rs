@@ -28,7 +28,8 @@ use rgb_lib::{
 	keys::WitnessVersion,
 	wallet::{
 		rust_only::{AssetColoringInfo, ColoringInfo},
-		DatabaseType, IndexerConfig, OnlineOptions, RgbWalletOpsOffline, SinglesigKeys, Wallet, WalletData,
+		DatabaseType, IndexerConfig, OnlineOptions, RgbWalletOpsOffline, SinglesigKeys, Wallet,
+		WalletData,
 	},
 	AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
 	Fascia, FileContent, RgbTransfer, WitnessOrd,
@@ -209,11 +210,12 @@ fn _get_evm_rpc_urls(kv_store: &dyn KVStoreSync) -> HashMap<u64, String> {
 pub fn rgb_online_options(
 	indexer_url: String, evm_rpc_urls: HashMap<u64, String>, skip_consistency_check: bool,
 ) -> OnlineOptions {
-	let indexer_config = if indexer_url.starts_with("https://") || indexer_url.starts_with("http://") {
-		IndexerConfig::Esplora { url: indexer_url }
-	} else {
-		IndexerConfig::Electrum { url: indexer_url }
-	};
+	let indexer_config =
+		if indexer_url.starts_with("https://") || indexer_url.starts_with("http://") {
+			IndexerConfig::Esplora { url: indexer_url }
+		} else {
+			IndexerConfig::Electrum { url: indexer_url }
+		};
 	OnlineOptions {
 		indexer_config,
 		skip_consistency_check,
