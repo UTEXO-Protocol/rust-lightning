@@ -29,6 +29,10 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+      - uses: ./.github/actions/git-credentials
+        with:
+          token: ${{ secrets.ORG_READ_TOKEN || secrets.RGB_LIB_RUST_LIGHTNING_PAT }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - name: Install Rust ${{ matrix.toolchain }} toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
@@ -47,6 +51,10 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+      - uses: ./.github/actions/git-credentials
+        with:
+          token: ${{ secrets.ORG_READ_TOKEN || secrets.RGB_LIB_RUST_LIGHTNING_PAT }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - name: Install Rust ${{ env.TOOLCHAIN }} toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ env.TOOLCHAIN }}
