@@ -34,7 +34,9 @@ use crate::ln::chan_utils::{
 };
 use crate::ln::msgs::DecodeError;
 use crate::sign::{ecdsa::EcdsaChannelSigner, EntropySource, HTLCDescriptor, SignerProvider};
+use crate::sync::Arc;
 use crate::util::logger::Logger;
+use crate::util::persist::KVStoreSync;
 use crate::util::ser::{
 	MaybeReadable, Readable, ReadableArgs, UpgradableRequired, Writeable, Writer,
 };
@@ -277,6 +279,11 @@ pub struct OnchainTxHandler<ChannelSigner: EcdsaChannelSigner> {
 	onchain_events_awaiting_threshold_conf: Vec<OnchainEventEntry>,
 
 	pub(super) secp_ctx: Secp256k1<secp256k1::All>,
+
+	/// Runtime `ldk_data_dir` + RGB KVStore used by `color_claim` to reach RGB transfer
+	/// info. `None` means no RGB coloring should be attempted.
+	ldk_data_dir: Option<String>,
+	rgb_kv_store: Option<Arc<dyn KVStoreSync + Send + Sync>>,
 }
 
 impl<ChannelSigner: EcdsaChannelSigner> PartialEq for OnchainTxHandler<ChannelSigner> {
@@ -348,15 +355,20 @@ impl<ChannelSigner: EcdsaChannelSigner> OnchainTxHandler<ChannelSigner> {
 	}
 }
 
-impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP, u64, [u8; 32])>
-	for OnchainTxHandler<SP::EcdsaSigner>
+impl<'a, 'b, ES: EntropySource, SP: SignerProvider>
+	ReadableArgs<(
+		&'a ES,
+		&'b SP,
+		u64,
+		[u8; 32],
+		Option<String>,
+		Option<Arc<dyn KVStoreSync + Send + Sync>>,
+	)> for OnchainTxHandler<SP::EcdsaSigner>
 {
 	#[rustfmt::skip]
-	fn read<R: io::Read>(reader: &mut R, args: (&'a ES, &'b SP, u64, [u8; 32])) -> Result<Self, DecodeError> {
-		let entropy_source = args.0;
-		let signer_provider = args.1;
-		let channel_value_satoshis = args.2;
-		let channel_keys_id = args.3;
+	fn read<R: io::Read>(reader: &mut R, args: (&'a ES, &'b SP, u64, [u8; 32], Option<String>, Option<Arc<dyn KVStoreSync + Send + Sync>>)) -> Result<Self, DecodeError> {
+		let (entropy_source, signer_provider, channel_value_satoshis, channel_keys_id, ldk_data_dir_arg, rgb_kv_store_arg) =
+			args;
 
 		let _ver = read_ver_prefix!(reader, SERIALIZATION_VERSION);
 
@@ -438,6 +450,8 @@ impl<'a, 'b, ES: EntropySource, SP: SignerProvider> ReadableArgs<(&'a ES, &'b SP
 			onchain_events_awaiting_threshold_conf,
 			pending_claim_events: Vec::new(),
 			secp_ctx,
+			ldk_data_dir: ldk_data_dir_arg,
+			rgb_kv_store: rgb_kv_store_arg,
 		})
 	}
 }
@@ -447,6 +461,7 @@ impl<ChannelSigner: EcdsaChannelSigner> OnchainTxHandler<ChannelSigner> {
 		channel_value_satoshis: u64, channel_keys_id: [u8; 32], destination_script: ScriptBuf,
 		signer: ChannelSigner, channel_parameters: ChannelTransactionParameters,
 		holder_commitment: HolderCommitmentTransaction, secp_ctx: Secp256k1<secp256k1::All>,
+		ldk_data_dir: Option<String>, rgb_kv_store: Option<Arc<dyn KVStoreSync + Send + Sync>>,
 	) -> Self {
 		OnchainTxHandler {
 			channel_value_satoshis,
@@ -462,6 +477,8 @@ impl<ChannelSigner: EcdsaChannelSigner> OnchainTxHandler<ChannelSigner> {
 			onchain_events_awaiting_threshold_conf: Vec::new(),
 			pending_claim_events: Vec::new(),
 			secp_ctx,
+			ldk_data_dir,
+			rgb_kv_store,
 		}
 	}
 
@@ -477,6 +494,16 @@ impl<ChannelSigner: EcdsaChannelSigner> OnchainTxHandler<ChannelSigner> {
 		let mut events = Vec::new();
 		swap(&mut events, &mut self.pending_claim_events);
 		events
+	}
+
+	/// Returns the runtime `ldk_data_dir` used by `color_claim`.
+	pub(crate) fn ldk_data_dir(&self) -> Option<&str> {
+		self.ldk_data_dir.as_deref()
+	}
+
+	/// Returns the runtime RGB KVStore used by `color_claim`.
+	pub(crate) fn rgb_kv_store(&self) -> Option<&Arc<dyn KVStoreSync + Send + Sync>> {
+		self.rgb_kv_store.as_ref()
 	}
 
 	/// Triggers rebroadcasts/fee-bumps of pending claims from a force-closed channel. This is
@@ -1372,6 +1399,7 @@ mod tests {
 			chan_params,
 			holder_commit,
 			secp_ctx,
+			None,
 		);
 
 		// Create a broadcaster with current block height 1.

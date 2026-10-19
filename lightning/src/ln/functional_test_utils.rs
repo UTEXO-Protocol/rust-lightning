@@ -850,7 +850,7 @@ impl<'a, 'b, 'c> Drop for Node<'a, 'b, 'c> {
 					let (_, deserialized_monitor) =
 						<(BlockHash, ChannelMonitor<TestChannelSigner>)>::read(
 							&mut io::Cursor::new(&w.0),
-							(self.keys_manager, self.keys_manager),
+							(self.keys_manager, self.keys_manager, None, None),
 						)
 						.unwrap();
 					deserialized_monitors.push(deserialized_monitor);
@@ -1335,7 +1335,7 @@ pub fn _reload_node<'a, 'b, 'c>(
 		let mut monitor_read = &encoded[..];
 		let (_, monitor) = <(BlockHash, ChannelMonitor<TestChannelSigner>)>::read(
 			&mut monitor_read,
-			(node.keys_manager, node.keys_manager),
+			(node.keys_manager, node.keys_manager, None, None),
 		)
 		.unwrap();
 		assert!(monitor_read.is_empty());
