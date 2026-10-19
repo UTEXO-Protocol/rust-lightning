@@ -1,0 +1,17 @@
+BFA draft CI
+
+Cargo needs read access to the private UTEXO-Protocol/rgb-lib-bfa repository.
+The default GITHUB_TOKEN is limited to the current repository. Configure
+ORG_READ_TOKEN with Contents: read access to the private dependencies, or
+add a BFA_READ_TOKEN secret scoped to rgb-lib-bfa. The existing
+RGB_LIB_RUST_LIGHTNING_PAT is used as a fallback for ORG_READ_TOKEN; it
+still needs explicit access to the new dependency. Organization approval
+or SSO authorization may be required. Never commit a token.
+
+The credential action verifies access before Cargo starts and fails with
+a specific diagnostic for missing or unauthorized credentials. No secrets
+are exposed to pull requests from forks. Format checks need no credentials.
+
+All build, lint and formatting checks remain enabled. This dependency
+migration does not establish Lightning runtime support in the companion
+on-chain Android build.
