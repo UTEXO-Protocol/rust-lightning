@@ -28,7 +28,8 @@ use rgb_lib::{
 	keys::WitnessVersion,
 	wallet::{
 		rust_only::{AssetColoringInfo, ColoringInfo},
-		DatabaseType, OnlineOptions, RgbWalletOpsOffline, SinglesigKeys, Wallet, WalletData,
+		DatabaseType, IndexerConfig, OnlineOptions, RgbWalletOpsOffline, SinglesigKeys, Wallet,
+		WalletData,
 	},
 	AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
 	Fascia, FileContent, RgbTransfer, WitnessOrd,
@@ -55,6 +56,8 @@ pub const INDEXER_URL_FNAME: &str = "indexer_url";
 /// KVStore configuration key for the Ethereum RPC used to validate BFA funding consignments.
 /// Missing or empty values disable BFA support.
 pub const ETH_RPC_URL_FNAME: &str = "eth_rpc_url";
+/// EVM RPC endpoints by chain ID, serialized as JSON for the current unlock.
+pub const EVM_RPC_URLS_FNAME: &str = "evm_rpc_urls";
 /// Name of the file containing the account-level xPub of the vanilla-side of the wallet
 pub const WALLET_ACCOUNT_XPUB_VANILLA_FNAME: &str = "wallet_account_xpub_vanilla";
 /// Name of the file containing the account-level xPub of the colored-side of the wallet
@@ -195,6 +198,34 @@ fn _get_eth_rpc_url(kv_store: &dyn KVStoreSync) -> Option<String> {
 	}
 }
 
+fn _get_evm_rpc_urls(kv_store: &dyn KVStoreSync) -> HashMap<u64, String> {
+	match kv_store.read_config(EVM_RPC_URLS_FNAME) {
+		Ok(value) => serde_json::from_str(&value).expect("invalid EVM RPC map in KVStore"),
+		Err(e) if e.kind() == io::ErrorKind::NotFound => HashMap::new(),
+		Err(e) => panic!("cannot read EVM RPC configuration: {e}"),
+	}
+}
+
+/// Construct explicit indexer and EVM options for the protocol-1.0 BFA library.
+pub fn rgb_online_options(
+	indexer_url: String, evm_rpc_urls: HashMap<u64, String>, skip_consistency_check: bool,
+) -> OnlineOptions {
+	let indexer_config =
+		if indexer_url.starts_with("https://") || indexer_url.starts_with("http://") {
+			IndexerConfig::Esplora { url: indexer_url }
+		} else {
+			IndexerConfig::Electrum { url: indexer_url }
+		};
+	OnlineOptions {
+		indexer_config,
+		skip_consistency_check,
+		vanilla_sync_lookback: VANILLA_SYNC_LOOKBACK,
+		failed_witness_receive_grace_secs: 86400,
+		proxy_auth_keys: HashMap::new(),
+		evm_rpc_urls,
+	}
+}
+
 #[cfg(test)]
 mod bfa_config_tests {
 	use super::*;
@@ -238,7 +269,7 @@ pub fn supported_asset_schemas(bitcoin_network: BitcoinNetwork, bfa: bool) -> Ve
 
 fn _new_rgb_wallet(
 	data_dir: String, bitcoin_network: BitcoinNetwork, account_xpub_vanilla: String,
-	account_xpub_colored: String, master_fingerprint: String, reuse_addresses: bool, bfa: bool,
+	account_xpub_colored: String, master_fingerprint: String, _reuse_addresses: bool, bfa: bool,
 ) -> Wallet {
 	let keys = SinglesigKeys {
 		account_xpub_vanilla,
@@ -255,7 +286,6 @@ fn _new_rgb_wallet(
 			database_type: DatabaseType::Sqlite,
 			max_allocations_per_utxo: 1,
 			supported_schemas: supported_asset_schemas(bitcoin_network, bfa),
-			reuse_addresses,
 		},
 		keys,
 	)
@@ -282,7 +312,7 @@ fn _get_wallet_data(
 }
 
 async fn _get_rgb_wallet(ldk_data_dir: &Path, kv_store: &dyn KVStoreSync) -> Wallet {
-	let bfa = _get_eth_rpc_url(kv_store).is_some();
+	let bfa = !_get_evm_rpc_urls(kv_store).is_empty();
 	let (
 		data_dir,
 		bitcoin_network,
@@ -328,7 +358,7 @@ async fn _accept_transfer(
 		reuse_addresses,
 	) = _get_wallet_data(ldk_data_dir, kv_store);
 	let indexer_url = _get_indexer_url(kv_store);
-	let eth_rpc_url = _get_eth_rpc_url(kv_store);
+	let evm_rpc_urls = _get_evm_rpc_urls(kv_store);
 	// the consignment is received from the channel counterparty over the p2p link and written to disk
 	let consignment_path = ldk_data_dir.join(format!("consignment_{funding_txid}"));
 	tokio::task::spawn_blocking(move || {
@@ -339,14 +369,9 @@ async fn _accept_transfer(
 			account_xpub_colored,
 			master_fingerprint,
 			reuse_addresses,
-			eth_rpc_url.is_some(),
+			!evm_rpc_urls.is_empty(),
 		);
-		let online = wallet.go_online(OnlineOptions {
-			indexer_url,
-			skip_consistency_check: true,
-			vanilla_sync_lookback: VANILLA_SYNC_LOOKBACK,
-			eth_rpc_url,
-		})?;
+		let online = wallet.go_online(rgb_online_options(indexer_url, evm_rpc_urls, true))?;
 		let (consignment, assignments, media_digests) = wallet.accept_transfer_consignment(
 			online,
 			consignment_path,
