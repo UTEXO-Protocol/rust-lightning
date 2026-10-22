@@ -32,6 +32,17 @@ jobs:
       - name: Install Rust ${{ matrix.toolchain }} toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
+      - name: Configure access to private UTEXO-Protocol dependencies
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.RGB_LIB_RUST_LIGHTNING_PAT }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::RGB_LIB_RUST_LIGHTNING_PAT unavailable (e.g. fork PR); private git deps will fail to fetch"
+            exit 0
+          fi
+          git config --global url."https://x-access-token:${TOKEN}@github.com/UTEXO-Protocol/".insteadOf "https://github.com/UTEXO-Protocol/"
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
       - name: Use rust-lld linker on Windows
         if: matrix.platform == 'windows-latest'
         shell: bash
@@ -50,6 +61,17 @@ jobs:
       - name: Install Rust ${{ env.TOOLCHAIN }} toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ env.TOOLCHAIN }}
+      - name: Configure access to private UTEXO-Protocol dependencies
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.RGB_LIB_RUST_LIGHTNING_PAT }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::RGB_LIB_RUST_LIGHTNING_PAT unavailable (e.g. fork PR); private git deps will fail to fetch"
+            exit 0
+          fi
+          git config --global url."https://x-access-token:${TOKEN}@github.com/UTEXO-Protocol/".insteadOf "https://github.com/UTEXO-Protocol/"
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
       - name: Install clippy
         run: |
           rustup component add clippy

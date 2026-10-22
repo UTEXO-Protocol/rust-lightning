@@ -1720,6 +1720,8 @@ where
 	) -> Option<LSPS2Request> {
 		match peer_state_lock.pending_requests.remove(request_id) {
 			Some(req) => {
+				// `try_update` is the new name, but is far newer than our MSRV
+				#[allow(deprecated)]
 				let res = self.total_pending_requests.fetch_update(
 					Ordering::Relaxed,
 					Ordering::Relaxed,

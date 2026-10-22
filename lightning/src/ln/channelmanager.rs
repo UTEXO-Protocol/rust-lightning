@@ -6554,7 +6554,7 @@ where
 				}
 			}
 
-			if funding_transaction.output.len() > u16::max_value() as usize {
+			if funding_transaction.output.len() > u16::MAX as usize {
 				result = result.and(Err(APIError::APIMisuseError {
 					err: "Transaction had more than 2^16 outputs, which is not supported".to_owned()
 				}));
