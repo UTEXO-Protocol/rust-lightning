@@ -46,6 +46,9 @@ jobs:
       - name: Build the workspace
         shell: bash # Default on Winblows is powershell
         run: cargo check --workspace --features lightning/electrum --verbose --color always
+      - name: Test the public RGB configuration contract with Electrum
+        shell: bash
+        run: cargo test -p lightning --features electrum --test rgb_config --verbose --color always
 
   esplora:
     name: Esplora workspace (Rust 1.94.0)
@@ -63,6 +66,8 @@ jobs:
           rustflags: ""
       - name: Check the supported Esplora source graph
         run: cargo check --workspace --features lightning/esplora --verbose --color always
+      - name: Test the public RGB configuration contract with Esplora
+        run: cargo test -p lightning --features esplora --test rgb_config --verbose --color always
 
   linting:
     timeout-minutes: 30
