@@ -9,12 +9,16 @@ on:
       - master
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -29,6 +33,9 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+      - uses: ./.github/actions/private-sources
+        with:
+          token: ${{ secrets.ORG_READ_TOKEN || secrets.RGB_LIB_RUST_LIGHTNING_PAT }}
       - name: Install Rust ${{ matrix.toolchain }} toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
@@ -40,13 +47,34 @@ jobs:
         shell: bash # Default on Winblows is powershell
         run: cargo check --workspace --features lightning/electrum --verbose --color always
 
+  esplora:
+    name: Esplora workspace (Rust 1.94.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/private-sources
+        with:
+          token: ${{ secrets.ORG_READ_TOKEN || secrets.RGB_LIB_RUST_LIGHTNING_PAT }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.94.0
+          rustflags: ""
+      - name: Check the supported Esplora source graph
+        run: cargo check --workspace --features lightning/esplora --verbose --color always
+
   linting:
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     env:
       TOOLCHAIN: stable
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+      - uses: ./.github/actions/private-sources
+        with:
+          token: ${{ secrets.ORG_READ_TOKEN || secrets.RGB_LIB_RUST_LIGHTNING_PAT }}
       - name: Install Rust ${{ env.TOOLCHAIN }} toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ env.TOOLCHAIN }}
@@ -58,6 +86,7 @@ jobs:
           ./ci/check-lint.sh
 
   rustfmt:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     env:
       TOOLCHAIN: 1.63.0
