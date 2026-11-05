@@ -1,5 +1,5 @@
 name: Authenticate the pinned private RGB source
-description: Configure Cargo's Git CLI fetches for rgb-lib-bfa.
+description: Configure Cargo's Git CLI fetches for the pinned BFA RGB graph.
 inputs:
   token:
     description: Credential with read access to the pinned UTEXO-Protocol dependencies.
@@ -14,10 +14,12 @@ runs:
       run: |
         set -euo pipefail
         if [[ -z "$UTEXO_SOURCE_READ_TOKEN" ]]; then
-          echo "::error::Configure ORG_READ_TOKEN or RGB_LIB_RUST_LIGHTNING_PAT with read access to rgb-lib-bfa."
+          echo "::error::Configure ORG_READ_TOKEN or RGB_LIB_RUST_LIGHTNING_PAT with read access to the pinned BFA RGB graph."
           exit 1
         fi
-        git config --global \
-          url."https://x-access-token:${UTEXO_SOURCE_READ_TOKEN}@github.com/UTEXO-Protocol/rgb-lib-bfa.git".insteadOf \
-          "https://github.com/UTEXO-Protocol/rgb-lib-bfa.git"
+        for repo in rgb-lib-bfa rgb-consensus-s-bfa rgb-ops-s-bfa rgb-api-s-bfa rgb-schemas-s-bfa; do
+          git config --global \
+            url."https://x-access-token:${UTEXO_SOURCE_READ_TOKEN}@github.com/UTEXO-Protocol/${repo}.git".insteadOf \
+            "https://github.com/UTEXO-Protocol/${repo}.git"
+        done
         echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
